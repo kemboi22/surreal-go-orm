@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
 
 	surrealgoorm "github.com/kemboi22/surreal-go-orm"
 	"github.com/surrealdb/surrealdb.go"
@@ -22,7 +23,7 @@ func NewBelongsTo[Parent any](foreignKey, ownerKey string) *BelongsTo[Parent] {
 	}
 }
 
-func (b *BelongsTo[Parent]) Get(ctx context.Context, db *surrealgoorm.DB, model interface{}) (*Parent, error) {
+func (b *BelongsTo[Parent]) Get(ctx context.Context, db *surrealgoorm.DB, model any) (*Parent, error) {
 	result := new(Parent)
 
 	foreignValue := getFieldValue(model, b.foreignKey)
@@ -48,7 +49,7 @@ func (b *BelongsTo[Parent]) Get(ctx context.Context, db *surrealgoorm.DB, model 
 	return result, nil
 }
 
-func (b *BelongsTo[Parent]) Set(ctx context.Context, db *surrealgoorm.DB, model interface{}, parent *Parent) error {
+func (b *BelongsTo[Parent]) Set(ctx context.Context, db *surrealgoorm.DB, model any, parent *Parent) error {
 	parentID := getModelID(parent)
 	if parentID == "" {
 		return fmt.Errorf("parent model has no ID")
@@ -70,7 +71,7 @@ func NewHasMany[Related any](foreignKey, localKey string) *HasMany[Related] {
 	}
 }
 
-func (h *HasMany[Related]) Get(ctx context.Context, db *surrealgoorm.DB, model interface{}) ([]Related, error) {
+func (h *HasMany[Related]) Get(ctx context.Context, db *surrealgoorm.DB, model any) ([]Related, error) {
 	var results []Related
 
 	localID := getModelID(model)
@@ -101,7 +102,7 @@ func (h *HasMany[Related]) Get(ctx context.Context, db *surrealgoorm.DB, model i
 	return results, nil
 }
 
-func (h *HasMany[Related]) Create(ctx context.Context, db *surrealgoorm.DB, model interface{}, related *Related) error {
+func (h *HasMany[Related]) Create(ctx context.Context, db *surrealgoorm.DB, model any, related *Related) error {
 	localID := getModelID(model)
 	if localID == "" {
 		return fmt.Errorf("model has no ID")
@@ -111,7 +112,7 @@ func (h *HasMany[Related]) Create(ctx context.Context, db *surrealgoorm.DB, mode
 	return surrealgoorm.Create(ctx, db, related)
 }
 
-func (h *HasMany[Related]) SaveMany(ctx context.Context, db *surrealgoorm.DB, model interface{}, relatedList []Related) error {
+func (h *HasMany[Related]) SaveMany(ctx context.Context, db *surrealgoorm.DB, model any, relatedList []Related) error {
 	for i := range relatedList {
 		if err := h.Create(ctx, db, model, &relatedList[i]); err != nil {
 			return err
@@ -132,7 +133,7 @@ func NewHasOne[Related any](foreignKey, localKey string) *HasOne[Related] {
 	}
 }
 
-func (h *HasOne[Related]) Get(ctx context.Context, db *surrealgoorm.DB, model interface{}) (*Related, error) {
+func (h *HasOne[Related]) Get(ctx context.Context, db *surrealgoorm.DB, model any) (*Related, error) {
 	result := new(Related)
 
 	localID := getModelID(model)
@@ -159,17 +160,17 @@ func (h *HasOne[Related]) Get(ctx context.Context, db *surrealgoorm.DB, model in
 	return result, nil
 }
 
-func (h *HasOne[Related]) Create(ctx context.Context, db *surrealgoorm.DB, model interface{}, related *Related) error {
+func (h *HasOne[Related]) Create(ctx context.Context, db *surrealgoorm.DB, model any, related *Related) error {
 	localID := getModelID(model)
 	if localID == "" {
 		return fmt.Errorf("model has no ID")
 	}
 
 	setFieldValue(related, h.foreignKey, models.NewRecordID("", localID))
-	return orm.Create(ctx, db, related)
+	return surrealgoorm.Create(ctx, db, related)
 }
 
-func (h *HasOne[Related]) Save(ctx context.Context, db *surrealgoorm.DB, model interface{}, related *Related) error {
+func (h *HasOne[Related]) Save(ctx context.Context, db *surrealgoorm.DB, model any, related *Related) error {
 	return h.Create(ctx, db, model, related)
 }
 
@@ -187,7 +188,7 @@ func NewManyToMany[Related any](pivotTable, foreignKey, relatedKey string) *Many
 	}
 }
 
-func (m *ManyToMany[Related]) Get(ctx context.Context, db *surrealgoorm.DB, model interface{}) ([]Related, error) {
+func (m *ManyToMany[Related]) Get(ctx context.Context, db *surrealgoorm.DB, model any) ([]Related, error) {
 	var results []Related
 
 	localID := getModelID(model)
@@ -223,7 +224,7 @@ func (m *ManyToMany[Related]) Get(ctx context.Context, db *surrealgoorm.DB, mode
 	return results, nil
 }
 
-func (m *ManyToMany[Related]) Attach(ctx context.Context, db *surrealgoorm.DB, model interface{}, relatedID string) error {
+func (m *ManyToMany[Related]) Attach(ctx context.Context, db *surrealgoorm.DB, model any, relatedID string) error {
 	localID := getModelID(model)
 	if localID == "" {
 		return fmt.Errorf("model has no ID")
@@ -241,7 +242,7 @@ func (m *ManyToMany[Related]) Attach(ctx context.Context, db *surrealgoorm.DB, m
 	return err
 }
 
-func (m *ManyToMany[Related]) Detach(ctx context.Context, db *surrealgoorm.DB, model interface{}, relatedID string) error {
+func (m *ManyToMany[Related]) Detach(ctx context.Context, db *surrealgoorm.DB, model any, relatedID string) error {
 	localID := getModelID(model)
 	if localID == "" {
 		return fmt.Errorf("model has no ID")
@@ -262,7 +263,7 @@ func (m *ManyToMany[Related]) Detach(ctx context.Context, db *surrealgoorm.DB, m
 	return err
 }
 
-func (m *ManyToMany[Related]) Sync(ctx context.Context, db *surrealgoorm.DB, model interface{}, relatedIDs []string) error {
+func (m *ManyToMany[Related]) Sync(ctx context.Context, db *surrealgoorm.DB, model any, relatedIDs []string) error {
 	current, err := m.Get(ctx, db, model)
 	if err != nil {
 		return err
@@ -284,13 +285,7 @@ func (m *ManyToMany[Related]) Sync(ctx context.Context, db *surrealgoorm.DB, mod
 	}
 
 	for id := range currentIDs {
-		found := false
-		for _, rid := range relatedIDs {
-			if rid == id {
-				found = true
-				break
-			}
-		}
+		found := slices.Contains(relatedIDs, id)
 		if !found {
 			if err := m.Detach(ctx, db, model, id); err != nil {
 				return err
@@ -301,13 +296,13 @@ func (m *ManyToMany[Related]) Sync(ctx context.Context, db *surrealgoorm.DB, mod
 	return nil
 }
 
-func getModelID(model interface{}) string {
+func getModelID(model any) string {
 	if model == nil {
 		return ""
 	}
 
 	v := reflect.ValueOf(model)
-	if v.Kind() == reflect.Ptr {
+	if v.Kind() == reflect.Pointer {
 		v = v.Elem()
 	}
 
@@ -317,12 +312,12 @@ func getModelID(model interface{}) string {
 
 	for i := 0; i < v.NumField(); i++ {
 		field := v.Field(i)
-		if field.Type() == reflect.TypeOf(models.RecordID{}) {
+		if field.Type() == reflect.TypeFor[models.RecordID]() {
 			if rid, ok := field.Interface().(models.RecordID); ok {
-				return rid.IDValue()
+				return rid.String()
 			}
 		}
-		if field.Type() == reflect.TypeOf("") {
+		if field.Type() == reflect.TypeFor[string]() {
 			if fieldName := v.Type().Field(i).Name; fieldName == "ID" {
 				return field.Interface().(string)
 			}
@@ -332,13 +327,13 @@ func getModelID(model interface{}) string {
 	return ""
 }
 
-func getFieldValue(model interface{}, field string) interface{} {
+func getFieldValue(model any, field string) any {
 	if model == nil {
 		return nil
 	}
 
 	v := reflect.ValueOf(model)
-	if v.Kind() == reflect.Ptr {
+	if v.Kind() == reflect.Pointer {
 		v = v.Elem()
 	}
 
@@ -355,13 +350,13 @@ func getFieldValue(model interface{}, field string) interface{} {
 	return nil
 }
 
-func setFieldValue(model interface{}, field string, value interface{}) {
+func setFieldValue(model any, field string, value any) {
 	if model == nil {
 		return
 	}
 
 	v := reflect.ValueOf(model)
-	if v.Kind() == reflect.Ptr {
+	if v.Kind() == reflect.Pointer {
 		v = v.Elem()
 	}
 
@@ -379,19 +374,19 @@ func setFieldValue(model interface{}, field string, value interface{}) {
 
 func getTableNameFromType[T any]() string {
 	var t T
-	if tn, ok := any(&t).(orm.TableName); ok {
+	if tn, ok := any(&t).(surrealgoorm.TableName); ok {
 		return tn.TableName()
 	}
 	return ""
 }
 
-func mapToStructORM(m map[string]any, s interface{}) error {
+func mapToStructORM(m map[string]any, s any) error {
 	if s == nil {
 		return fmt.Errorf("destination is nil")
 	}
 
 	v := reflect.ValueOf(s)
-	if v.Kind() == reflect.Ptr {
+	if v.Kind() == reflect.Pointer {
 		v = v.Elem()
 	}
 
@@ -445,9 +440,9 @@ func splitORMTag(tag string) []string {
 }
 
 type MorphTo[Related any] struct {
-	relatedType string
-	idField     string
-	typeField   string
+	_         string
+	idField   string
+	typeField string
 }
 
 func NewMorphTo[Related any](idField, typeField string) *MorphTo[Related] {
@@ -457,7 +452,7 @@ func NewMorphTo[Related any](idField, typeField string) *MorphTo[Related] {
 	}
 }
 
-func (m *MorphTo[Related]) Get(ctx context.Context, db *surrealgoorm.DB, model interface{}) (*Related, error) {
+func (m *MorphTo[Related]) Get(ctx context.Context, db *surrealgoorm.DB, model any) (*Related, error) {
 	result := new(Related)
 
 	idValue := getFieldValue(model, m.idField)

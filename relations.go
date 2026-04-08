@@ -8,9 +8,9 @@ import (
 	"github.com/surrealdb/surrealdb.go/pkg/models"
 )
 
-func (db *DB) With(ctx context.Context, model interface{}, relations ...string) error {
+func (db *DB) With(ctx context.Context, model any, relations ...string) error {
 	v := reflect.ValueOf(model)
-	if v.Kind() == reflect.Ptr {
+	if v.Kind() == reflect.Pointer {
 		v = v.Elem()
 	}
 
@@ -28,7 +28,7 @@ func (db *DB) With(ctx context.Context, model interface{}, relations ...string) 
 	return loadSingleModelRelations(ctx, db, model, relations)
 }
 
-func loadSingleModelRelations(ctx context.Context, db *DB, model interface{}, relations []string) error {
+func loadSingleModelRelations(ctx context.Context, db *DB, model any, relations []string) error {
 	for _, rel := range relations {
 		if err := loadRelation(ctx, db, model, rel); err != nil {
 			return err
@@ -37,9 +37,9 @@ func loadSingleModelRelations(ctx context.Context, db *DB, model interface{}, re
 	return nil
 }
 
-func loadRelation(ctx context.Context, db *DB, model interface{}, relation string) error {
+func loadRelation(ctx context.Context, db *DB, model any, relation string) error {
 	v := reflect.ValueOf(model)
-	if v.Kind() == reflect.Ptr {
+	if v.Kind() == reflect.Pointer {
 		v = v.Elem()
 	}
 
@@ -73,7 +73,7 @@ func loadRelation(ctx context.Context, db *DB, model interface{}, relation strin
 	return nil
 }
 
-func loadHasMany(ctx context.Context, db *DB, model interface{}, field reflect.Value, relation string, fieldType reflect.StructField) error {
+func loadHasMany(ctx context.Context, db *DB, model any, field reflect.Value, relation string, fieldType reflect.StructField) error {
 	modelID := getModelID(model)
 	if modelID == "" {
 		return nil
@@ -106,7 +106,7 @@ func loadHasMany(ctx context.Context, db *DB, model interface{}, field reflect.V
 	return nil
 }
 
-func loadHasOne(ctx context.Context, db *DB, model interface{}, field reflect.Value, relation string, fieldType reflect.StructField) error {
+func loadHasOne(ctx context.Context, db *DB, model any, field reflect.Value, relation string, fieldType reflect.StructField) error {
 	modelID := getModelID(model)
 	if modelID == "" {
 		return nil
@@ -132,7 +132,7 @@ func loadHasOne(ctx context.Context, db *DB, model interface{}, field reflect.Va
 	return nil
 }
 
-func loadBelongsTo(ctx context.Context, db *DB, model interface{}, field reflect.Value, relation string, fieldType reflect.StructField) error {
+func loadBelongsTo(ctx context.Context, db *DB, model any, field reflect.Value, relation string, fieldType reflect.StructField) error {
 	foreignValue := getFieldValue(model, fieldType.Name)
 	if foreignValue == nil {
 		return nil
@@ -149,7 +149,7 @@ func loadBelongsTo(ctx context.Context, db *DB, model interface{}, field reflect
 	}
 
 	elemType := fieldType.Type.Elem()
-	if elemType.Kind() == reflect.Ptr {
+	if elemType.Kind() == reflect.Pointer {
 		elemType = elemType.Elem()
 	}
 
@@ -178,13 +178,13 @@ func getForeignKeyFromTag(tag reflect.StructTag, fallback string) string {
 	return fallback
 }
 
-func getModelID(model interface{}) string {
+func getModelID(model any) string {
 	if model == nil {
 		return ""
 	}
 
 	v := reflect.ValueOf(model)
-	if v.Kind() == reflect.Ptr {
+	if v.Kind() == reflect.Pointer {
 		v = v.Elem()
 	}
 
@@ -194,12 +194,12 @@ func getModelID(model interface{}) string {
 
 	for i := 0; i < v.NumField(); i++ {
 		field := v.Field(i)
-		if field.Type() == reflect.TypeOf(models.RecordID{}) {
+		if field.Type() == reflect.TypeFor[models.RecordID]() {
 			if rid, ok := field.Interface().(models.RecordID); ok {
 				return rid.ID.(string)
 			}
 		}
-		if field.Type() == reflect.TypeOf("") {
+		if field.Type() == reflect.TypeFor[string]() {
 			if fieldName := v.Type().Field(i).Name; fieldName == "ID" {
 				if id, ok := field.Interface().(string); ok {
 					return id
@@ -211,13 +211,13 @@ func getModelID(model interface{}) string {
 	return ""
 }
 
-func getFieldValue(model interface{}, field string) interface{} {
+func getFieldValue(model any, field string) any {
 	if model == nil {
 		return nil
 	}
 
 	v := reflect.ValueOf(model)
-	if v.Kind() == reflect.Ptr {
+	if v.Kind() == reflect.Pointer {
 		v = v.Elem()
 	}
 
@@ -234,9 +234,9 @@ func getFieldValue(model interface{}, field string) interface{} {
 	return nil
 }
 
-func mapToModelWithRelations(model interface{}, row map[string]any) {
+func mapToModelWithRelations(model any, row map[string]any) {
 	v := reflect.ValueOf(model)
-	if v.Kind() == reflect.Ptr {
+	if v.Kind() == reflect.Pointer {
 		v = v.Elem()
 	}
 

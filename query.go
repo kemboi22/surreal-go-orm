@@ -69,7 +69,7 @@ func (rb *RawBuilder) Exec(ctx context.Context) error {
 	return err
 }
 
-func (rb *RawBuilder) All(ctx context.Context, results interface{}) error {
+func (rb *RawBuilder) All(ctx context.Context, results any) error {
 	resp, err := surrealdb.Query[[]map[string]any](ctx, rb.db.raw, rb.sql, rb.buildParams())
 	if err != nil {
 		return err
@@ -82,7 +82,7 @@ func (rb *RawBuilder) All(ctx context.Context, results interface{}) error {
 	return mapSliceToStruct((*resp)[0].Result, results)
 }
 
-func (rb *RawBuilder) One(ctx context.Context, result interface{}) error {
+func (rb *RawBuilder) One(ctx context.Context, result any) error {
 	rb.sql = addLimitOne(rb.sql)
 
 	resp, err := surrealdb.Query[[]map[string]any](ctx, rb.db.raw, rb.sql, rb.buildParams())
@@ -125,9 +125,9 @@ func addLimitOne(sql string) string {
 	return sql
 }
 
-func mapSliceToStruct(rows []map[string]any, results interface{}) error {
+func mapSliceToStruct(rows []map[string]any, results any) error {
 	v := reflect.ValueOf(results)
-	if v.Kind() != reflect.Ptr {
+	if v.Kind() != reflect.Pointer {
 		return fmt.Errorf("results must be a pointer")
 	}
 
@@ -269,48 +269,49 @@ func (tq *TableQuery) RightJoin(table string, left string, op string, right stri
 }
 
 func (tq *TableQuery) buildSQL() string {
-	sql := "SELECT "
+	var sql strings.Builder
+	sql.WriteString("SELECT ")
 	if len(tq.selects) > 0 {
-		sql += formatSelects(tq.selects)
+		sql.WriteString(formatSelects(tq.selects))
 	} else {
-		sql += "*"
+		sql.WriteString("*")
 	}
-	sql += " FROM " + tq.table
+	sql.WriteString(" FROM " + tq.table)
 
 	for _, join := range tq.joins {
-		sql += fmt.Sprintf(" %s JOIN %s ON %s %s %s", join.Type, join.Table, join.OnLeft, join.OnOp, join.OnRight)
+		fmt.Fprintf(&sql, " %s JOIN %s ON %s %s %s", join.Type, join.Table, join.OnLeft, join.OnOp, join.OnRight)
 	}
 
 	if len(tq.wheres) > 0 {
-		sql += " WHERE "
+		sql.WriteString(" WHERE ")
 		for i, w := range tq.wheres {
 			if i > 0 {
-				sql += " AND "
+				sql.WriteString(" AND ")
 			}
 			if w.Operator != "" {
-				sql += fmt.Sprintf("%s %s $w%d", w.Field, w.Operator, i)
+				fmt.Fprintf(&sql, "%s %s $w%d", w.Field, w.Operator, i)
 			} else {
-				sql += w.Field
+				sql.WriteString(w.Field)
 			}
 		}
 	}
 
 	for _, o := range tq.orders {
-		sql += " ORDER BY " + o.Field
+		sql.WriteString(" ORDER BY " + o.Field)
 		if o.Desc {
-			sql += " DESC"
+			sql.WriteString(" DESC")
 		}
 	}
 
 	if tq.limitVal > 0 {
-		sql += fmt.Sprintf(" LIMIT %d", tq.limitVal)
+		fmt.Fprintf(&sql, " LIMIT %d", tq.limitVal)
 	}
 
 	if tq.offsetVal > 0 {
-		sql += fmt.Sprintf(" OFFSET %d", tq.offsetVal)
+		fmt.Fprintf(&sql, " OFFSET %d", tq.offsetVal)
 	}
 
-	return sql
+	return sql.String()
 }
 
 func (tq *TableQuery) String() string {
@@ -321,7 +322,7 @@ func (tq *TableQuery) SQL() (string, map[string]any) {
 	return tq.buildSQL(), tq.buildParams()
 }
 
-func (tq *TableQuery) All(ctx context.Context, results interface{}) error {
+func (tq *TableQuery) All(ctx context.Context, results any) error {
 	sql, params := tq.buildSQL(), tq.buildParams()
 	resp, err := surrealdb.Query[[]map[string]any](ctx, tq.db.raw, sql, params)
 	if err != nil {
@@ -335,7 +336,7 @@ func (tq *TableQuery) All(ctx context.Context, results interface{}) error {
 	return mapSliceToStruct((*resp)[0].Result, results)
 }
 
-func (tq *TableQuery) One(ctx context.Context, result interface{}) error {
+func (tq *TableQuery) One(ctx context.Context, result any) error {
 	tq.limitVal = 1
 	sql, params := tq.buildSQL(), tq.buildParams()
 	resp, err := surrealdb.Query[[]map[string]any](ctx, tq.db.raw, sql, params)
@@ -381,7 +382,7 @@ func (tq *TableQuery) buildParams() map[string]any {
 	return params
 }
 
-func (tq *TableQuery) First(ctx context.Context, result interface{}) error {
+func (tq *TableQuery) First(ctx context.Context, result any) error {
 	return tq.Limit(1).One(ctx, result)
 }
 
@@ -390,7 +391,7 @@ func (tq *TableQuery) Exists(ctx context.Context) (bool, error) {
 	return count > 0, err
 }
 
-func (tq *TableQuery) Insert(ctx context.Context, data interface{}) error {
+func (tq *TableQuery) Insert(ctx context.Context, data any) error {
 	content, err := structToMap(data)
 	if err != nil {
 		return err
@@ -399,54 +400,54 @@ func (tq *TableQuery) Insert(ctx context.Context, data interface{}) error {
 	return err
 }
 
-func (tq *TableQuery) Update(ctx context.Context, data interface{}) error {
+func (tq *TableQuery) Update(ctx context.Context, data any) error {
 	content, err := structToMap(data)
 	if err != nil {
 		return err
 	}
-	sql, params := tq.buildSQL(), tq.buildParams()
-	sql = "UPDATE " + tq.table + " SET " + formatUpdateSet(content) + " WHERE " + extractWhereClause(tq.wheres)
+	_ /* sql*/, params := tq.buildSQL(), tq.buildParams()
+	sql := "UPDATE " + tq.table + " SET " + formatUpdateSet(content) + " WHERE " + extractWhereClause(tq.wheres)
 	_, err = surrealdb.Query[any](ctx, tq.db.raw, sql, params)
 	return err
 }
 
 func (tq *TableQuery) Delete(ctx context.Context) error {
-	sql, params := tq.buildSQL(), tq.buildParams()
-	sql = "DELETE FROM " + tq.table + " WHERE " + extractWhereClause(tq.wheres)
+	_ /* sql*/, params := tq.buildSQL(), tq.buildParams()
+	sql := "DELETE FROM " + tq.table + " WHERE " + extractWhereClause(tq.wheres)
 	_, err := surrealdb.Query[any](ctx, tq.db.raw, sql, params)
 	return err
 }
 
 func formatUpdateSet(data map[string]any) string {
-	result := ""
+	var result strings.Builder
 	i := 0
 	for k := range data {
 		if i > 0 {
-			result += ", "
+			result.WriteString(", ")
 		}
-		result += fmt.Sprintf("%s = $u%d", k, i)
+		fmt.Fprintf(&result, "%s = $u%d", k, i)
 		i++
 	}
-	return result
+	return result.String()
 }
 
 func extractWhereClause(wheres []WhereCondition) string {
 	if len(wheres) == 0 {
 		return "1=1"
 	}
-	sql := ""
+	var sql strings.Builder
 	for i, w := range wheres {
 		if i > 0 {
-			sql += " AND "
+			sql.WriteString(" AND ")
 		}
-		sql += fmt.Sprintf("%s %s $w%d", w.Field, w.Operator, i)
+		fmt.Fprintf(&sql, "%s %s $w%d", w.Field, w.Operator, i)
 	}
-	return sql
+	return sql.String()
 }
 
-func mapToStruct(m map[string]any, s interface{}) error {
+func mapToStruct(m map[string]any, s any) error {
 	v := reflect.ValueOf(s)
-	if v.Kind() == reflect.Ptr {
+	if v.Kind() == reflect.Pointer {
 		v = v.Elem()
 	}
 
@@ -480,11 +481,11 @@ func mapToStruct(m map[string]any, s interface{}) error {
 	return nil
 }
 
-func structToMap(s interface{}) (map[string]any, error) {
+func structToMap(s any) (map[string]any, error) {
 	result := make(map[string]any)
 
 	v := reflect.ValueOf(s)
-	if v.Kind() == reflect.Ptr {
+	if v.Kind() == reflect.Pointer {
 		v = v.Elem()
 	}
 
@@ -534,21 +535,21 @@ func splitTag(tag string) []string {
 }
 
 func formatSelects(fields []string) string {
-	result := ""
+	var result strings.Builder
 	for i, f := range fields {
 		if i > 0 {
-			result += ", "
+			result.WriteString(", ")
 		}
-		result += f
+		result.WriteString(f)
 	}
-	return result
+	return result.String()
 }
 
 func GetTableName[T any](model *T) string {
 	if tn, ok := any(model).(TableName); ok && tn.TableName() != "" {
 		return tn.TableName()
 	}
-	name := strings.TrimPrefix(reflect.TypeOf(model).Elem().Name(), "")
+	name := strings.TrimPrefix(reflect.TypeFor[T]().Name(), "")
 	if name == "" {
 		return ""
 	}
@@ -677,61 +678,62 @@ func (mq *ModelQuery[T]) Offset(n int) *ModelQuery[T] {
 }
 
 func (mq *ModelQuery[T]) buildSQL() string {
-	sql := "SELECT "
+	var sql strings.Builder
+	sql.WriteString("SELECT ")
 	if len(mq.selects) > 0 {
-		sql += formatSelects(mq.selects)
+		sql.WriteString(formatSelects(mq.selects))
 	} else {
-		sql += "*"
+		sql.WriteString("*")
 	}
-	sql += " FROM " + mq.table
+	sql.WriteString(" FROM " + mq.table)
 
 	if len(mq.wheres) > 0 {
-		sql += " WHERE "
+		sql.WriteString(" WHERE ")
 		for i, w := range mq.wheres {
 			if i > 0 && !w.Or {
-				sql += " AND "
+				sql.WriteString(" AND ")
 			}
 			if i > 0 && w.Or {
-				sql += " OR "
+				sql.WriteString(" OR ")
 			}
 			if w.Operator != "" {
-				sql += fmt.Sprintf("%s %s $w%d", w.Field, w.Operator, i)
+				fmt.Fprintf(&sql, "%s %s $w%d", w.Field, w.Operator, i)
 			} else {
-				sql += w.Field
+				sql.WriteString(w.Field)
 			}
 		}
 	}
 
 	if mq.onlyTrashed {
 		if len(mq.wheres) > 0 {
-			sql += " AND deleted_at IS NOT NULL"
+			sql.WriteString(" AND deleted_at IS NOT NULL")
 		} else {
-			sql += " WHERE deleted_at IS NOT NULL"
+			sql.WriteString(" WHERE deleted_at IS NOT NULL")
 		}
 	} else if !mq.withTrashed {
 		if len(mq.wheres) > 0 {
-			sql += " AND deleted_at IS NULL"
+			sql.WriteString(" AND deleted_at IS NULL")
 		} else {
-			sql += " WHERE deleted_at IS NULL"
+			sql.WriteString(" WHERE deleted_at IS NULL")
 		}
 	}
 
 	for _, o := range mq.orders {
-		sql += " ORDER BY " + o.Field
+		sql.WriteString(" ORDER BY " + o.Field)
 		if o.Desc {
-			sql += " DESC"
+			sql.WriteString(" DESC")
 		}
 	}
 
 	if mq.limitVal > 0 {
-		sql += fmt.Sprintf(" LIMIT %d", mq.limitVal)
+		fmt.Fprintf(&sql, " LIMIT %d", mq.limitVal)
 	}
 
 	if mq.offsetVal > 0 {
-		sql += fmt.Sprintf(" OFFSET %d", mq.offsetVal)
+		fmt.Fprintf(&sql, " OFFSET %d", mq.offsetVal)
 	}
 
-	return sql
+	return sql.String()
 }
 
 func (mq *ModelQuery[T]) buildParams() map[string]any {

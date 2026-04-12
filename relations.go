@@ -3,8 +3,8 @@ package surrealgoorm
 import (
 	"context"
 	"reflect"
+	"strings"
 
-	"github.com/surrealdb/surrealdb.go"
 	"github.com/surrealdb/surrealdb.go/pkg/models"
 )
 
@@ -30,11 +30,33 @@ func (db *DB) With(ctx context.Context, model any, relations ...string) error {
 
 func loadSingleModelRelations(ctx context.Context, db *DB, model any, relations []string) error {
 	for _, rel := range relations {
-		if err := loadRelation(ctx, db, model, rel); err != nil {
+		if err := loadRelationPath(ctx, db, model, rel); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func loadRelationPath(ctx context.Context, db *DB, model any, relationPath string) error {
+	head, tail, _ := strings.Cut(relationPath, ".")
+	// Load the current relation first, then recurse into the remainder.
+	if err := loadRelation(ctx, db, model, head); err != nil {
+		return err
+	}
+	if tail == "" {
+		return nil
+	}
+
+	relatedValue, ok := getRelationValue(model, head)
+	if !ok || !relatedValue.IsValid() {
+		return nil
+	}
+
+	if relatedValue.Kind() == reflect.Pointer && relatedValue.IsNil() {
+		return nil
+	}
+
+	return db.With(ctx, relatedValue.Interface(), tail)
 }
 
 func loadRelation(ctx context.Context, db *DB, model any, relation string) error {
@@ -48,51 +70,48 @@ func loadRelation(ctx context.Context, db *DB, model any, relation string) error
 	}
 
 	t := v.Type()
-	for i := 0; i < t.NumField(); i++ {
-		field := v.Field(i)
-		fieldType := t.Field(i)
-		tag := fieldType.Tag.Get("orm")
-
-		relType, relName := parseRelationTag(tag)
-		if relName != relation {
-			continue
-		}
-
-		switch relType {
-		case "has_many":
-			return loadHasMany(ctx, db, model, field, relation, fieldType)
-		case "has_one":
-			return loadHasOne(ctx, db, model, field, relation, fieldType)
-		case "belongs_to":
-			return loadBelongsTo(ctx, db, model, field, relation, fieldType)
-		}
-
-		break
+	meta := getModelMetadata(t)
+	fieldMeta, ok := meta.relations[relation]
+	if !ok {
+		return nil
 	}
+	field := valueByIndexPath(v, fieldMeta.IndexPath)
+	fieldType := t.FieldByIndex(fieldMeta.IndexPath)
 
-	return nil
+	switch fieldMeta.Relation.Type {
+	case "has_many":
+		return loadHasMany(ctx, db, model, field, fieldMeta.Relation, fieldType)
+	case "has_one":
+		return loadHasOne(ctx, db, model, field, fieldMeta.Relation, fieldType)
+	case "belongs_to":
+		return loadBelongsTo(ctx, db, model, field, fieldMeta.Relation, fieldType)
+	default:
+		return nil
+	}
 }
 
-func loadHasMany(ctx context.Context, db *DB, model any, field reflect.Value, relation string, fieldType reflect.StructField) error {
-	modelID := getModelID(model)
-	if modelID == "" {
+func loadHasMany(ctx context.Context, db *DB, model any, field reflect.Value, meta relationTag, fieldType reflect.StructField) error {
+	recordID := getModelRecordIDString(model)
+	if recordID == "" {
 		return nil
 	}
 
-	foreignKey := getForeignKeyFromTag(fieldType.Tag, "user_id")
+	foreignKey := meta.ForeignKey
+	if foreignKey == "" {
+		foreignKey = defaultForeignKeyForModel(model)
+	}
 
 	elemType := fieldType.Type.Elem()
-	sliceType := reflect.SliceOf(elemType)
-	slice := reflect.New(sliceType)
+	slice := reflect.MakeSlice(field.Type(), 0, 0)
 
-	sql := "SELECT * FROM " + relation + " WHERE " + foreignKey + " = ?"
-	resp, err := surrealdb.Query[[]map[string]any](ctx, db.raw, sql, map[string]any{"0": "users:" + modelID})
+	sql := "SELECT * FROM " + meta.Name + " WHERE " + foreignKey + " = $id"
+	resp, err := db.query(ctx, sql, map[string]any{"id": recordID})
 	if err != nil {
 		return err
 	}
 
 	if resp == nil || len(*resp) == 0 || (*resp)[0].Result == nil {
-		field.Set(slice.Elem())
+		field.Set(slice)
 		return nil
 	}
 
@@ -102,20 +121,23 @@ func loadHasMany(ctx context.Context, db *DB, model any, field reflect.Value, re
 		slice = reflect.Append(slice, elem.Elem())
 	}
 
-	field.Set(slice.Elem())
+	field.Set(slice)
 	return nil
 }
 
-func loadHasOne(ctx context.Context, db *DB, model any, field reflect.Value, relation string, fieldType reflect.StructField) error {
-	modelID := getModelID(model)
-	if modelID == "" {
+func loadHasOne(ctx context.Context, db *DB, model any, field reflect.Value, meta relationTag, fieldType reflect.StructField) error {
+	recordID := getModelRecordIDString(model)
+	if recordID == "" {
 		return nil
 	}
 
-	foreignKey := getForeignKeyFromTag(fieldType.Tag, "user_id")
+	foreignKey := meta.ForeignKey
+	if foreignKey == "" {
+		foreignKey = defaultForeignKeyForModel(model)
+	}
 
-	sql := "SELECT * FROM " + relation + " WHERE " + foreignKey + " = ? LIMIT 1"
-	resp, err := surrealdb.Query[[]map[string]any](ctx, db.raw, sql, map[string]any{"0": "users:" + modelID})
+	sql := "SELECT * FROM " + meta.Name + " WHERE " + foreignKey + " = $id LIMIT 1"
+	resp, err := db.query(ctx, sql, map[string]any{"id": recordID})
 	if err != nil {
 		return err
 	}
@@ -127,13 +149,22 @@ func loadHasOne(ctx context.Context, db *DB, model any, field reflect.Value, rel
 	elemType := fieldType.Type.Elem()
 	elem := reflect.New(elemType)
 	mapToModelWithRelations(elem.Interface(), (*resp)[0].Result[0])
-	field.Set(elem)
+	if field.Kind() == reflect.Pointer {
+		field.Set(elem)
+		return nil
+	}
+	field.Set(elem.Elem())
 
 	return nil
 }
 
-func loadBelongsTo(ctx context.Context, db *DB, model any, field reflect.Value, relation string, fieldType reflect.StructField) error {
-	foreignValue := getFieldValue(model, fieldType.Name)
+func loadBelongsTo(ctx context.Context, db *DB, model any, field reflect.Value, meta relationTag, fieldType reflect.StructField) error {
+	foreignField := meta.ForeignKey
+	if foreignField == "" {
+		foreignField = fieldType.Name + "ID"
+	}
+
+	foreignValue := getFieldValue(model, foreignField)
 	if foreignValue == nil {
 		return nil
 	}
@@ -143,7 +174,12 @@ func loadBelongsTo(ctx context.Context, db *DB, model any, field reflect.Value, 
 	case models.RecordID:
 		rid = v
 	case string:
-		rid = models.NewRecordID(relation, v)
+		if strings.Contains(v, ":") {
+			parts := strings.SplitN(v, ":", 2)
+			rid = models.NewRecordID(parts[0], parts[1])
+		} else {
+			rid = models.NewRecordID(meta.Name, v)
+		}
 	default:
 		return nil
 	}
@@ -154,61 +190,24 @@ func loadBelongsTo(ctx context.Context, db *DB, model any, field reflect.Value, 
 	}
 
 	result := reflect.New(elemType)
-	_, err := surrealdb.Select[map[string]any](ctx, db.raw, rid)
+	record, err := selectRecord[map[string]any](ctx, db, rid)
 	if err != nil {
 		return err
 	}
+	if record == nil {
+		return ErrNotFound
+	}
 
-	field.Set(result)
+	if err := mapToStruct(*record, result.Interface()); err != nil {
+		return err
+	}
+
+	if field.Kind() == reflect.Pointer {
+		field.Set(result)
+		return nil
+	}
+	field.Set(result.Elem())
 	return nil
-}
-
-func parseRelationTag(tag string) (relationType, name string) {
-	parts := splitTag(tag)
-	if len(parts) >= 2 {
-		return parts[1], parts[0]
-	}
-	return "", ""
-}
-
-func getForeignKeyFromTag(tag reflect.StructTag, fallback string) string {
-	if val := tag.Get("foreign_key"); val != "" {
-		return val
-	}
-	return fallback
-}
-
-func getModelID(model any) string {
-	if model == nil {
-		return ""
-	}
-
-	v := reflect.ValueOf(model)
-	if v.Kind() == reflect.Pointer {
-		v = v.Elem()
-	}
-
-	if v.Kind() != reflect.Struct {
-		return ""
-	}
-
-	for i := 0; i < v.NumField(); i++ {
-		field := v.Field(i)
-		if field.Type() == reflect.TypeFor[models.RecordID]() {
-			if rid, ok := field.Interface().(models.RecordID); ok {
-				return rid.ID.(string)
-			}
-		}
-		if field.Type() == reflect.TypeFor[string]() {
-			if fieldName := v.Type().Field(i).Name; fieldName == "ID" {
-				if id, ok := field.Interface().(string); ok {
-					return id
-				}
-			}
-		}
-	}
-
-	return ""
 }
 
 func getFieldValue(model any, field string) any {
@@ -234,35 +233,28 @@ func getFieldValue(model any, field string) any {
 	return nil
 }
 
-func mapToModelWithRelations(model any, row map[string]any) {
+func getRelationValue(model any, relation string) (reflect.Value, bool) {
+	if model == nil {
+		return reflect.Value{}, false
+	}
+
 	v := reflect.ValueOf(model)
 	if v.Kind() == reflect.Pointer {
 		v = v.Elem()
 	}
-
 	if v.Kind() != reflect.Struct {
-		return
+		return reflect.Value{}, false
 	}
 
-	t := v.Type()
-	for i := 0; i < t.NumField(); i++ {
-		field := v.Field(i)
-		fieldType := t.Field(i)
-		tag := fieldType.Tag.Get("orm")
-
-		if tag == "" {
-			continue
-		}
-
-		parts := splitTag(tag)
-		columnName := parts[0]
-
-		if columnName == "" || columnName == "-" {
-			continue
-		}
-
-		if val, ok := row[columnName]; ok && val != nil && field.CanSet() {
-			field.Set(reflect.ValueOf(val))
-		}
+	meta := getModelMetadata(v.Type())
+	fieldMeta, ok := meta.relations[relation]
+	if !ok {
+		return reflect.Value{}, false
 	}
+
+	return valueByIndexPath(v, fieldMeta.IndexPath), true
+}
+
+func mapToModelWithRelations(model any, row map[string]any) {
+	_ = mapToStruct(row, model)
 }

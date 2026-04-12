@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 
 	surrealgoorm "github.com/kemboi22/surreal-go-orm"
 	"github.com/surrealdb/surrealdb.go"
@@ -36,16 +37,25 @@ func (b *BelongsTo[Parent]) Get(ctx context.Context, db *surrealgoorm.DB, model 
 	case models.RecordID:
 		rid = v
 	case string:
-		rid = models.NewRecordID("", v)
+		if strings.Contains(v, ":") {
+			parts := strings.SplitN(v, ":", 2)
+			rid = models.NewRecordID(parts[0], parts[1])
+		} else {
+			rid = models.NewRecordID("", v)
+		}
 	default:
 		return nil, fmt.Errorf("invalid foreign key type")
 	}
 
-	_, err := surrealdb.Select[Parent](ctx, db.Raw(), rid)
+	record, err := surrealdb.Select[Parent](ctx, db.Raw(), rid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get related model: %w", err)
 	}
+	if record == nil {
+		return nil, fmt.Errorf("related model not found")
+	}
 
+	*result = *record
 	return result, nil
 }
 
@@ -81,7 +91,7 @@ func (h *HasMany[Related]) Get(ctx context.Context, db *surrealgoorm.DB, model a
 
 	rid := models.NewRecordID("", localID)
 
-	sql := fmt.Sprintf("SELECT * FROM %s WHERE %s = $id", getTableNameFromType[Related](), h.localKey)
+	sql := fmt.Sprintf("SELECT * FROM %s WHERE %s = $id", getTableNameFromType[Related](), h.foreignKey)
 	resp, err := surrealdb.Query[[]map[string]any](ctx, db.Raw(), sql, map[string]any{"id": rid.String()})
 	if err != nil {
 		return nil, err
@@ -143,7 +153,7 @@ func (h *HasOne[Related]) Get(ctx context.Context, db *surrealgoorm.DB, model an
 
 	rid := models.NewRecordID("", localID)
 
-	sql := fmt.Sprintf("SELECT * FROM %s WHERE %s = $id LIMIT 1", getTableNameFromType[Related](), h.localKey)
+	sql := fmt.Sprintf("SELECT * FROM %s WHERE %s = $id LIMIT 1", getTableNameFromType[Related](), h.foreignKey)
 	resp, err := surrealdb.Query[[]map[string]any](ctx, db.Raw(), sql, map[string]any{"id": rid.String()})
 	if err != nil {
 		return nil, err
@@ -242,6 +252,15 @@ func (m *ManyToMany[Related]) Attach(ctx context.Context, db *surrealgoorm.DB, m
 	return err
 }
 
+func (m *ManyToMany[Related]) AttachMany(ctx context.Context, db *surrealgoorm.DB, model any, relatedIDs []string) error {
+	for _, relatedID := range relatedIDs {
+		if err := m.Attach(ctx, db, model, relatedID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (m *ManyToMany[Related]) Detach(ctx context.Context, db *surrealgoorm.DB, model any, relatedID string) error {
 	localID := getModelID(model)
 	if localID == "" {
@@ -261,6 +280,15 @@ func (m *ManyToMany[Related]) Detach(ctx context.Context, db *surrealgoorm.DB, m
 	})
 
 	return err
+}
+
+func (m *ManyToMany[Related]) DetachMany(ctx context.Context, db *surrealgoorm.DB, model any, relatedIDs []string) error {
+	for _, relatedID := range relatedIDs {
+		if err := m.Detach(ctx, db, model, relatedID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (m *ManyToMany[Related]) Sync(ctx context.Context, db *surrealgoorm.DB, model any, relatedIDs []string) error {
@@ -402,10 +430,8 @@ func mapToStructORM(m map[string]any, s any) error {
 			continue
 		}
 
-		parts := splitORMTag(tag)
-		columnName := parts[0]
-
-		if columnName == "" || columnName == "-" {
+		columnName, ok := ormColumnName(tag)
+		if !ok || columnName == "-" {
 			continue
 		}
 
@@ -420,23 +446,19 @@ func mapToStructORM(m map[string]any, s any) error {
 	return nil
 }
 
-func splitORMTag(tag string) []string {
-	var parts []string
-	current := ""
-	for _, c := range tag {
-		if c == ';' || c == ':' {
-			if current != "" {
-				parts = append(parts, current)
-			}
-			current = ""
-		} else {
-			current += string(c)
+func ormColumnName(tag string) (string, bool) {
+	for _, part := range strings.Split(tag, ";") {
+		part = strings.TrimSpace(part)
+		if !strings.HasPrefix(part, "column:") {
+			continue
 		}
+		value := strings.TrimSpace(strings.TrimPrefix(part, "column:"))
+		if value == "" {
+			return "", false
+		}
+		return value, true
 	}
-	if current != "" {
-		parts = append(parts, current)
-	}
-	return parts
+	return "", false
 }
 
 type MorphTo[Related any] struct {
@@ -467,12 +489,16 @@ func (m *MorphTo[Related]) Get(ctx context.Context, db *surrealgoorm.DB, model a
 		return nil, fmt.Errorf("invalid morph id type")
 	}
 
-	_, err := surrealdb.Select[Related](ctx, db.Raw(), rid)
+	record, err := surrealdb.Select[Related](ctx, db.Raw(), rid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get related model: %w", err)
 	}
+	if record == nil {
+		return nil, fmt.Errorf("related model not found")
+	}
 
 	_ = typeValue
+	*result = *record
 	return result, nil
 }
 
@@ -490,6 +516,30 @@ func NewMorphOne[Related any](foreignKey, localKey, morphType string) *MorphOne[
 	}
 }
 
+func (m *MorphOne[Related]) Get(ctx context.Context, db *surrealgoorm.DB, model any) (*Related, error) {
+	result := new(Related)
+	localID := getModelID(model)
+	if localID == "" {
+		return nil, fmt.Errorf("model has no ID")
+	}
+
+	sql := fmt.Sprintf("SELECT * FROM %s WHERE %s = $id AND type = $type LIMIT 1", getTableNameFromType[Related](), m.foreignKey)
+	resp, err := surrealdb.Query[[]map[string]any](ctx, db.Raw(), sql, map[string]any{
+		"id":   localID,
+		"type": m.morphType,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil || len(*resp) == 0 || (*resp)[0].Result == nil || len((*resp)[0].Result) == 0 {
+		return nil, fmt.Errorf("related model not found")
+	}
+	if err := mapToStructORM((*resp)[0].Result[0], result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 type MorphMany[Related any] struct {
 	foreignKey string
 	localKey   string
@@ -502,4 +552,33 @@ func NewMorphMany[Related any](foreignKey, localKey, morphType string) *MorphMan
 		localKey:   localKey,
 		morphType:  morphType,
 	}
+}
+
+func (m *MorphMany[Related]) Get(ctx context.Context, db *surrealgoorm.DB, model any) ([]Related, error) {
+	localID := getModelID(model)
+	if localID == "" {
+		return nil, fmt.Errorf("model has no ID")
+	}
+
+	sql := fmt.Sprintf("SELECT * FROM %s WHERE %s = $id AND type = $type", getTableNameFromType[Related](), m.foreignKey)
+	resp, err := surrealdb.Query[[]map[string]any](ctx, db.Raw(), sql, map[string]any{
+		"id":   localID,
+		"type": m.morphType,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil || len(*resp) == 0 || (*resp)[0].Result == nil {
+		return []Related{}, nil
+	}
+
+	results := make([]Related, 0, len((*resp)[0].Result))
+	for _, row := range (*resp)[0].Result {
+		item := new(Related)
+		if err := mapToStructORM(row, item); err != nil {
+			return nil, err
+		}
+		results = append(results, *item)
+	}
+	return results, nil
 }

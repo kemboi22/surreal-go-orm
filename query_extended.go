@@ -6,8 +6,8 @@ import (
 	"maps"
 	"reflect"
 	"strings"
+	"time"
 
-	"github.com/surrealdb/surrealdb.go"
 	"github.com/surrealdb/surrealdb.go/pkg/models"
 )
 
@@ -30,14 +30,18 @@ type QueryBuilder struct {
 	db           *DB
 	table        string
 	selectFields []string
+	selectRaws   []string
 	wheres       []WhereCondition
 	orders       []OrderBy
+	orderRaws    []string
 	limitVal     int
 	offsetVal    int
 	withs        []string
 	groupBys     []string
+	softDelete   bool
 	onlyTrashed  bool
 	withTrashed  bool
+	allowAll     bool
 }
 
 func (db *DB) Query(table string) *QueryBuilder {
@@ -51,6 +55,11 @@ func (db *DB) Query(table string) *QueryBuilder {
 
 func (qb *QueryBuilder) Select(fields ...string) *QueryBuilder {
 	qb.selectFields = fields
+	return qb
+}
+
+func (qb *QueryBuilder) SelectRaw(sql string) *QueryBuilder {
+	qb.selectRaws = append(qb.selectRaws, sql)
 	return qb
 }
 
@@ -84,6 +93,30 @@ func (qb *QueryBuilder) WhereBetween(field string, start, end any) *QueryBuilder
 	return qb
 }
 
+func (qb *QueryBuilder) WhereLike(field string, value string) *QueryBuilder {
+	qb.wheres = append(qb.wheres, WhereCondition{Field: field, Operator: "CONTAINS", Value: value})
+	return qb
+}
+
+func (qb *QueryBuilder) WhereExists(subquery string, bindings ...any) *QueryBuilder {
+	qb.wheres = append(qb.wheres, WhereCondition{
+		Field: "(" + "EXISTS(" + formatRawCondition(subquery, len(qb.wheres), bindings) + ")" + ")",
+	})
+	return qb
+}
+
+func (qb *QueryBuilder) WhereGroup(fn func(*QueryBuilder)) *QueryBuilder {
+	group := &QueryBuilder{}
+	fn(group)
+	groupSQL := buildWhereClause(group.wheres, true)
+	groupBindings := flattenBindings(group.wheres)
+	qb.wheres = append(qb.wheres, WhereCondition{
+		Field: "(" + strings.ReplaceAll(groupSQL, "$w", "?") + ")",
+		Value: groupBindings,
+	})
+	return qb
+}
+
 func (qb *QueryBuilder) OrderBy(field string) *QueryBuilder {
 	qb.orders = append(qb.orders, OrderBy{Field: field, Desc: false})
 	return qb
@@ -91,6 +124,11 @@ func (qb *QueryBuilder) OrderBy(field string) *QueryBuilder {
 
 func (qb *QueryBuilder) OrderByDesc(field string) *QueryBuilder {
 	qb.orders = append(qb.orders, OrderBy{Field: field, Desc: true})
+	return qb
+}
+
+func (qb *QueryBuilder) OrderByRaw(sql string) *QueryBuilder {
+	qb.orderRaws = append(qb.orderRaws, sql)
 	return qb
 }
 
@@ -104,6 +142,11 @@ func (qb *QueryBuilder) Offset(n int) *QueryBuilder {
 	return qb
 }
 
+func (qb *QueryBuilder) AllowAll() *QueryBuilder {
+	qb.allowAll = true
+	return qb
+}
+
 func (qb *QueryBuilder) With(relations ...string) *QueryBuilder {
 	qb.withs = append(qb.withs, relations...)
 	return qb
@@ -114,12 +157,19 @@ func (qb *QueryBuilder) GroupBy(fields ...string) *QueryBuilder {
 	return qb
 }
 
+func (qb *QueryBuilder) SoftDeletes() *QueryBuilder {
+	qb.softDelete = true
+	return qb
+}
+
 func (qb *QueryBuilder) WithTrashed() *QueryBuilder {
+	qb.softDelete = true
 	qb.withTrashed = true
 	return qb
 }
 
 func (qb *QueryBuilder) OnlyTrashed() *QueryBuilder {
+	qb.softDelete = true
 	qb.onlyTrashed = true
 	return qb
 }
@@ -127,49 +177,41 @@ func (qb *QueryBuilder) OnlyTrashed() *QueryBuilder {
 func (qb *QueryBuilder) buildSQL() string {
 	var sql strings.Builder
 	sql.WriteString("SELECT ")
-	if len(qb.selectFields) > 0 {
-		sql.WriteString(formatSelects(qb.selectFields))
+	selectParts := append([]string{}, qb.selectFields...)
+	selectParts = append(selectParts, qb.selectRaws...)
+	if len(selectParts) > 0 {
+		sql.WriteString(formatSelects(selectParts))
 	} else {
 		sql.WriteString("*")
 	}
 	sql.WriteString(" FROM " + qb.table)
 
-	if len(qb.withs) > 0 {
-		sql.WriteString(" FETCH " + formatSelects(qb.withs))
-	}
-
 	if len(qb.wheres) > 0 {
 		sql.WriteString(" WHERE ")
-		for i, w := range qb.wheres {
-			if i > 0 && !w.Or {
-				sql.WriteString(" AND ")
-			}
-			if i > 0 && w.Or {
-				sql.WriteString(" OR ")
-			}
-			if w.Operator != "" {
-				fmt.Fprintf(&sql, "%s %s $w%d", w.Field, w.Operator, i)
-			} else {
-				sql.WriteString(w.Field)
-			}
-		}
+		sql.WriteString(buildWhereClause(qb.wheres, true))
 	}
 
-	if qb.onlyTrashed {
-		sql.WriteString(" AND deleted_at IS NOT NULL")
-	} else if !qb.withTrashed {
-		sql.WriteString(" AND deleted_at IS NULL")
+	appendSoftDeleteClause(&sql, len(qb.wheres) > 0, qb.softDelete, qb.withTrashed, qb.onlyTrashed)
+
+	if len(qb.withs) > 0 {
+		sql.WriteString(" FETCH " + formatSelects(qb.withs))
 	}
 
 	if len(qb.groupBys) > 0 {
 		sql.WriteString(" GROUP BY " + formatSelects(qb.groupBys))
 	}
 
-	for _, o := range qb.orders {
-		sql.WriteString(" ORDER BY " + o.Field)
-		if o.Desc {
-			sql.WriteString(" DESC")
+	if len(qb.orders) > 0 || len(qb.orderRaws) > 0 {
+		orderParts := make([]string, 0, len(qb.orders)+len(qb.orderRaws))
+		for _, o := range qb.orders {
+			part := o.Field
+			if o.Desc {
+				part += " DESC"
+			}
+			orderParts = append(orderParts, part)
 		}
+		orderParts = append(orderParts, qb.orderRaws...)
+		sql.WriteString(" ORDER BY " + strings.Join(orderParts, ", "))
 	}
 
 	if qb.limitVal > 0 {
@@ -184,15 +226,7 @@ func (qb *QueryBuilder) buildSQL() string {
 }
 
 func (qb *QueryBuilder) buildParams() map[string]any {
-	params := make(map[string]any)
-	for i, w := range qb.wheres {
-		if w.Operator == "IN" || w.Operator == "BETWEEN" {
-			params[fmt.Sprintf("w%d", i)] = w.Value
-		} else if w.Value != nil {
-			params[fmt.Sprintf("w%d", i)] = w.Value
-		}
-	}
-	return params
+	return buildWhereParams(qb.wheres)
 }
 
 func (qb *QueryBuilder) SQL() (string, map[string]any) {
@@ -200,26 +234,32 @@ func (qb *QueryBuilder) SQL() (string, map[string]any) {
 }
 
 func (qb *QueryBuilder) All(ctx context.Context, results any) error {
+	if err := ensureTableName(qb.table); err != nil {
+		return err
+	}
 	sql, params := qb.buildSQL(), qb.buildParams()
-	resp, err := surrealdb.Query[[]map[string]any](ctx, qb.db.raw, sql, params)
+	resp, err := qb.db.query(ctx, sql, params)
 	if err != nil {
 		return err
 	}
-	if resp == nil || len(*resp) == 0 || (*resp)[0].Result == nil {
+	if resp == nil || len(*resp) == 0 || (*resp)[0].Result == nil || len((*resp)[0].Result) == 0 {
 		return nil
 	}
 	return mapSliceToStruct((*resp)[0].Result, results)
 }
 
 func (qb *QueryBuilder) One(ctx context.Context, result any) error {
+	if err := ensureTableName(qb.table); err != nil {
+		return err
+	}
 	qb.limitVal = 1
 	sql, params := qb.buildSQL(), qb.buildParams()
-	resp, err := surrealdb.Query[[]map[string]any](ctx, qb.db.raw, sql, params)
+	resp, err := qb.db.query(ctx, sql, params)
 	if err != nil {
 		return err
 	}
 	if resp == nil || len(*resp) == 0 || (*resp)[0].Result == nil || len((*resp)[0].Result) == 0 {
-		return fmt.Errorf("record not found")
+		return ErrNotFound
 	}
 	return mapToStruct((*resp)[0].Result[0], result)
 }
@@ -229,9 +269,12 @@ func (qb *QueryBuilder) First(ctx context.Context, result any) error {
 }
 
 func (qb *QueryBuilder) Count(ctx context.Context) (int, error) {
+	if err := ensureTableName(qb.table); err != nil {
+		return 0, err
+	}
 	sql, params := qb.buildSQL(), qb.buildParams()
 	countSQL := "SELECT count() as count FROM (" + sql + ") as subquery"
-	resp, err := surrealdb.Query[[]map[string]any](ctx, qb.db.raw, countSQL, params)
+	resp, err := qb.db.query(ctx, countSQL, params)
 	if err != nil {
 		return 0, err
 	}
@@ -253,7 +296,7 @@ func (qb *QueryBuilder) Sum(ctx context.Context, field string) (float64, error) 
 	sql := qb.buildSQL()
 	params := qb.buildParams()
 	sumSQL := fmt.Sprintf("SELECT math::sum(%s) as sum FROM (%s) as subquery", field, sql)
-	resp, err := surrealdb.Query[[]map[string]any](ctx, qb.db.raw, sumSQL, params)
+	resp, err := qb.db.query(ctx, sumSQL, params)
 	if err != nil {
 		return 0, err
 	}
@@ -270,7 +313,7 @@ func (qb *QueryBuilder) Avg(ctx context.Context, field string) (float64, error) 
 	sql := qb.buildSQL()
 	params := qb.buildParams()
 	avgSQL := fmt.Sprintf("SELECT math::mean(%s) as avg FROM (%s) as subquery", field, sql)
-	resp, err := surrealdb.Query[[]map[string]any](ctx, qb.db.raw, avgSQL, params)
+	resp, err := qb.db.query(ctx, avgSQL, params)
 	if err != nil {
 		return 0, err
 	}
@@ -287,7 +330,7 @@ func (qb *QueryBuilder) Min(ctx context.Context, field string) (float64, error) 
 	sql := qb.buildSQL()
 	params := qb.buildParams()
 	minSQL := fmt.Sprintf("SELECT math::min(%s) as min FROM (%s) as subquery", field, sql)
-	resp, err := surrealdb.Query[[]map[string]any](ctx, qb.db.raw, minSQL, params)
+	resp, err := qb.db.query(ctx, minSQL, params)
 	if err != nil {
 		return 0, err
 	}
@@ -304,7 +347,7 @@ func (qb *QueryBuilder) Max(ctx context.Context, field string) (float64, error) 
 	sql := qb.buildSQL()
 	params := qb.buildParams()
 	maxSQL := fmt.Sprintf("SELECT math::max(%s) as max FROM (%s) as subquery", field, sql)
-	resp, err := surrealdb.Query[[]map[string]any](ctx, qb.db.raw, maxSQL, params)
+	resp, err := qb.db.query(ctx, maxSQL, params)
 	if err != nil {
 		return 0, err
 	}
@@ -318,49 +361,121 @@ func (qb *QueryBuilder) Max(ctx context.Context, field string) (float64, error) 
 }
 
 func (qb *QueryBuilder) Insert(ctx context.Context, data any) error {
-	content, err := structToMap(data)
-	if err != nil {
+	if err := ensureTableName(qb.table); err != nil {
 		return err
 	}
-	_, err = surrealdb.Create[any](ctx, qb.db.raw, qb.table, content)
+	var content map[string]any
+	switch v := data.(type) {
+	case map[string]any:
+		filtered := make(map[string]any)
+		for k, val := range v {
+			if val != nil {
+				filtered[k] = val
+			}
+		}
+		content = filtered
+	default:
+		var err error
+		content, err = structToMap(data)
+		if err != nil {
+			return err
+		}
+		filtered := make(map[string]any)
+		for k, val := range content {
+			if val != nil {
+				filtered[k] = val
+			}
+		}
+		content = filtered
+	}
+
+	content["created_at"] = time.Now()
+	content["updated_at"] = time.Now()
+
+	fields := make([]string, 0, len(content))
+	values := make(map[string]any, len(content))
+	for k, v := range content {
+		fields = append(fields, k)
+		values[k] = v
+	}
+
+	sql := "CREATE " + qb.table + " SET "
+	for i, f := range fields {
+		if i > 0 {
+			sql += ", "
+		}
+		sql += f + " = $" + f
+	}
+
+	_, err := qb.db.execQuery(ctx, sql, values)
 	return err
 }
 
 func (qb *QueryBuilder) Update(ctx context.Context, data any) error {
-	content, err := structToMap(data)
+	if err := ensureTableName(qb.table); err != nil {
+		return err
+	}
+	if err := ensureSafeMutation(qb.allowAll, qb.wheres); err != nil {
+		return err
+	}
+	content, err := updateContentMap(data)
 	if err != nil {
 		return err
 	}
-	_ /* sql*/, params := qb.buildSQL(), qb.buildParams()
-	sql := "UPDATE " + qb.table + " SET " + formatUpdateSet(content) + " WHERE " + extractWhereClause(qb.wheres)
-	_, err = surrealdb.Query[any](ctx, qb.db.raw, sql, params)
+	setSQL, setParams := buildUpdateSetClause(content)
+	params := mergeParams(qb.buildParams(), setParams)
+	sql := "UPDATE " + qb.table + " SET " + setSQL + " WHERE " + extractWhereClause(qb.wheres, true)
+	_, err = qb.db.execQuery(ctx, sql, params)
 	return err
 }
 
 func (qb *QueryBuilder) Delete(ctx context.Context) error {
-	_ /* sql*/, params := qb.buildSQL(), qb.buildParams()
-	sql := "DELETE FROM " + qb.table + " WHERE " + extractWhereClause(qb.wheres)
-	_, err := surrealdb.Query[any](ctx, qb.db.raw, sql, params)
+	if err := ensureTableName(qb.table); err != nil {
+		return err
+	}
+	if err := ensureSafeMutation(qb.allowAll, qb.wheres); err != nil {
+		return err
+	}
+	params := qb.buildParams()
+	if qb.softDelete {
+		sql := "UPDATE " + qb.table + " SET deleted_at = time::now() WHERE " + extractWhereClause(qb.wheres, true)
+		_, err := qb.db.execQuery(ctx, sql, params)
+		return err
+	}
+	sql := "DELETE FROM " + qb.table + " WHERE " + extractWhereClause(qb.wheres, true)
+	_, err := qb.db.execQuery(ctx, sql, params)
 	return err
 }
 
 func (qb *QueryBuilder) ForceDelete(ctx context.Context) error {
+	if err := ensureTableName(qb.table); err != nil {
+		return err
+	}
+	if err := ensureSafeMutation(qb.allowAll, qb.wheres); err != nil {
+		return err
+	}
 	oldWithTrashed := qb.withTrashed
 	oldOnlyTrashed := qb.onlyTrashed
 	qb.withTrashed = true
 	qb.onlyTrashed = true
-	_ /* sql*/, params := qb.buildSQL(), qb.buildParams()
-	sql := "DELETE FROM " + qb.table + " WHERE " + extractWhereClause(qb.wheres)
-	_, err := surrealdb.Query[any](ctx, qb.db.raw, sql, params)
+	params := qb.buildParams()
+	sql := "DELETE FROM " + qb.table + " WHERE " + extractWhereClause(qb.wheres, true)
+	_, err := qb.db.execQuery(ctx, sql, params)
 	qb.withTrashed = oldWithTrashed
 	qb.onlyTrashed = oldOnlyTrashed
 	return err
 }
 
 func (qb *QueryBuilder) Restore(ctx context.Context) error {
-	_ /* sql*/, params := qb.buildSQL(), qb.buildParams()
-	sql := "UPDATE " + qb.table + " SET deleted_at = null WHERE " + extractWhereClause(qb.wheres)
-	_, err := surrealdb.Query[any](ctx, qb.db.raw, sql, params)
+	if err := ensureTableName(qb.table); err != nil {
+		return err
+	}
+	if err := ensureSafeMutation(qb.allowAll, qb.wheres); err != nil {
+		return err
+	}
+	params := qb.buildParams()
+	sql := "UPDATE " + qb.table + " SET deleted_at = NONE WHERE " + extractWhereClause(qb.wheres, true)
+	_, err := qb.db.execQuery(ctx, sql, params)
 	return err
 }
 
@@ -382,7 +497,7 @@ func (qb *QueryBuilder) Paginate(ctx context.Context, page, perPage int, results
 	}
 
 	sql, params := qb.buildSQL(), qb.buildParams()
-	resp, err := surrealdb.Query[[]map[string]any](ctx, qb.db.raw, sql, params)
+	resp, err := qb.db.query(ctx, sql, params)
 	if err != nil {
 		return nil, err
 	}
@@ -411,6 +526,28 @@ func (qb *QueryBuilder) Paginate(ctx context.Context, page, perPage int, results
 	}, nil
 }
 
+func (qb *QueryBuilder) InsertMany(ctx context.Context, rows []map[string]any) error {
+	for _, row := range rows {
+		if err := qb.Insert(ctx, row); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (qb *QueryBuilder) UpdateMany(ctx context.Context, rows []map[string]any) error {
+	for _, row := range rows {
+		if err := qb.Update(ctx, row); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (qb *QueryBuilder) FirstOrFail(ctx context.Context, result any) error {
+	return qb.First(ctx, result)
+}
+
 func FirstOrCreate[T any](ctx context.Context, db *DB, model *T, where map[string]any) error {
 	table := GetTableName(model)
 
@@ -427,7 +564,7 @@ func FirstOrCreate[T any](ctx context.Context, db *DB, model *T, where map[strin
 	}
 
 	sql := "SELECT * FROM " + table + " WHERE " + conditions.String() + " LIMIT 1"
-	resp, err := surrealdb.Query[[]map[string]any](ctx, db.raw, sql, params)
+	resp, err := db.query(ctx, sql, params)
 	if err != nil {
 		return err
 	}
@@ -455,7 +592,7 @@ func UpdateOrCreate[T any](ctx context.Context, db *DB, model *T, where map[stri
 	}
 
 	sql := "SELECT * FROM " + table + " WHERE " + conditions.String() + " LIMIT 1"
-	resp, err := surrealdb.Query[[]map[string]any](ctx, db.raw, sql, params)
+	resp, err := db.query(ctx, sql, params)
 	if err != nil {
 		return err
 	}
@@ -463,8 +600,9 @@ func UpdateOrCreate[T any](ctx context.Context, db *DB, model *T, where map[stri
 	if resp != nil && len(*resp) > 0 && (*resp)[0].Result != nil && len((*resp)[0].Result) > 0 {
 		content, _ := structToMap(model)
 		maps.Copy(content, update)
-		updateSQL := "UPDATE " + table + " SET " + formatUpdateSet(content) + " WHERE " + conditions.String()
-		_, err = surrealdb.Query[any](ctx, db.raw, updateSQL, params)
+		setSQL, setParams := buildUpdateSetClause(content)
+		updateSQL := "UPDATE " + table + " SET " + setSQL + " WHERE " + conditions.String()
+		_, err = db.execQuery(ctx, updateSQL, mergeParams(params, setParams))
 		return err
 	}
 
@@ -493,7 +631,7 @@ func SoftDelete[T any](ctx context.Context, db *DB, model *T) error {
 	id := reflect.ValueOf(model).Elem().FieldByName("ID").Interface().(models.RecordID)
 
 	sql := "UPDATE " + table + " SET deleted_at = time::now() WHERE id = $id"
-	_, err := surrealdb.Query[any](ctx, db.raw, sql, map[string]any{"id": id.String()})
+	_, err := db.execQuery(ctx, sql, map[string]any{"id": id.String()})
 	return err
 }
 
@@ -501,8 +639,8 @@ func Restore[T any](ctx context.Context, db *DB, model *T) error {
 	table := GetTableName(model)
 	id := reflect.ValueOf(model).Elem().FieldByName("ID").Interface().(models.RecordID)
 
-	sql := "UPDATE " + table + " SET deleted_at = null WHERE id = $id"
-	_, err := surrealdb.Query[any](ctx, db.raw, sql, map[string]any{"id": id.String()})
+	sql := "UPDATE " + table + " SET deleted_at = NONE WHERE id = $id"
+	_, err := db.execQuery(ctx, sql, map[string]any{"id": id.String()})
 	return err
 }
 
@@ -511,6 +649,6 @@ func ForceDelete[T any](ctx context.Context, db *DB, model *T) error {
 	id := reflect.ValueOf(model).Elem().FieldByName("ID").Interface().(models.RecordID)
 
 	sql := "DELETE FROM " + table + " WHERE id = $id"
-	_, err := surrealdb.Query[any](ctx, db.raw, sql, map[string]any{"id": id.String()})
+	_, err := db.execQuery(ctx, sql, map[string]any{"id": id.String()})
 	return err
 }

@@ -11,6 +11,7 @@ import (
 // TableSchema is a small builder for SurrealDB table and field SQL.
 type TableSchema struct {
 	Name   string
+	Schema string
 	Fields []ormtypes.SchemaField
 }
 
@@ -23,13 +24,34 @@ func (s *TableSchema) AddField(field ormtypes.SchemaField) *TableSchema {
 	return s
 }
 
+// / Schema
+// / Either SCHEMALESS OR SCHEMAFULL
+func (s *TableSchema) SchemaType(schema string) *TableSchema {
+	s.Schema = schema
+	return s
+}
+func (s *TableSchema) SchemaFull() *TableSchema {
+	s.Schema = "SCHEMAFULL"
+	return s
+}
+func (s *TableSchema) SchemaLess() *TableSchema {
+	s.Schema = "SCHEMALESS"
+	return s
+}
+
 func (s *TableSchema) Statements() ([]string, error) {
 	if strings.TrimSpace(s.Name) == "" {
 		return nil, ErrEmptyTableName
 	}
+	if strings.TrimSpace(s.Schema) == "" {
+		return nil, ErrEmptySchemaType
+	}
+	if s.Schema != "SCHEMAFULL" && s.Schema != "SCHEMALESS" {
+		return nil, ErrInvalidSchemaType
+	}
 
 	statements := []string{
-		fmt.Sprintf("DEFINE TABLE %s SCHEMALESS;", s.Name),
+		fmt.Sprintf("DEFINE TABLE %s %s;", s.Name, s.Schema),
 	}
 
 	for _, field := range s.Fields {
@@ -97,7 +119,7 @@ func NewMigrator(db *DB) *Migrator {
 }
 
 func (m *Migrator) EnsureTable(ctx context.Context) error {
-	sql := fmt.Sprintf("DEFINE TABLE %s SCHEMALESS; DEFINE FIELD name ON %s TYPE string; DEFINE INDEX %s_name_idx ON %s FIELDS name UNIQUE;", m.table, m.table, m.table, m.table)
+	sql := fmt.Sprintf("DEFINE TABLE %s SCHEMAFULL; DEFINE FIELD name ON %s TYPE string; DEFINE INDEX %s_name_idx ON %s FIELDS name UNIQUE;", m.table, m.table, m.table, m.table)
 	return m.db.Exec(ctx, sql, nil)
 }
 
@@ -148,6 +170,34 @@ func (m *Migrator) Rollback(ctx context.Context, migration Migration) error {
 	deleteSQL := fmt.Sprintf("DELETE FROM %s WHERE name = $name", m.table)
 	return m.db.Exec(ctx, deleteSQL, map[string]any{"name": migration.Name()})
 }
+
+func (m *Migrator) AutoMigrate(ctx context.Context, schemas ...*TableSchema) error {
+	for _, schema := range schemas {
+		stmts, err := schema.Statements()
+		if err != nil {
+			return err
+		}
+		migration := schemaMigration{
+			name:    fmt.Sprintf("auto_%s", schema.Name),
+			upSQL:   stmts,
+			downSQL: []string{fmt.Sprintf("DROP TABLE %s", schema.Name)},
+		}
+		if err := m.Migrate(ctx, migration); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type schemaMigration struct {
+	name    string
+	upSQL   []string
+	downSQL []string
+}
+
+func (m schemaMigration) Name() string            { return m.name }
+func (m schemaMigration) Up() ([]string, error)   { return m.upSQL, nil }
+func (m schemaMigration) Down() ([]string, error) { return m.downSQL, nil }
 
 func (m *Migrator) applied(ctx context.Context, name string) (bool, error) {
 	var rows []map[string]any

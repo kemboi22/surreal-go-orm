@@ -96,14 +96,30 @@ func Object(name string) *ColumnBuilder {
 	}
 }
 
+func Record(name string, table string) *ColumnBuilder {
+	return &ColumnBuilder{
+		name:        name,
+		fieldType:   FieldTypeRecord,
+		recordTable: table,
+	}
+}
+
+func UUIDField(name string) *ColumnBuilder {
+	return &ColumnBuilder{
+		name:      name,
+		fieldType: FieldTypeUUID,
+	}
+}
+
 type ColumnBuilder struct {
-	name      string
-	fieldType FieldType
-	unique    bool
-	nullable  bool
-	default_  any
-	index     bool
-	notNull   bool
+	name        string
+	fieldType   FieldType
+	unique      bool
+	nullable    bool
+	default_    any
+	index       bool
+	notNull     bool
+	recordTable string
 }
 
 func (c *ColumnBuilder) Unique() *ColumnBuilder {
@@ -147,9 +163,13 @@ func (c *ColumnBuilder) Build() SchemaField {
 	if c.index {
 		opts = append(opts, FieldOption{Index: true})
 	}
+	ft := c.fieldType
+	if c.recordTable != "" {
+		ft = FieldType("record(" + c.recordTable + ")")
+	}
 	return SchemaField{
 		Name:    c.name,
-		Type:    c.fieldType,
+		Type:    ft,
 		Options: opts,
 	}
 }

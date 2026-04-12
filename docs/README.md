@@ -2,6 +2,12 @@
 
 Small ORM for SurrealDB in Go.
 
+## Install
+
+```bash
+go get github.com/kemboi22/surreal-go-orm
+```
+
 ## Docs
 
 - [Getting Started](./getting-started.md)

@@ -10,6 +10,7 @@ type Model struct {
 	ID        models.RecordID `orm:"column:id;primary"`
 	CreatedAt time.Time       `orm:"column:created_at;auto"`
 	UpdatedAt time.Time       `orm:"column:updated_at;auto"`
+	Active    bool            `orm:"column:active"`
 }
 
 func (m *Model) TableName() string {

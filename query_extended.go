@@ -369,6 +369,9 @@ func (qb *QueryBuilder) Insert(ctx context.Context, data any) error {
 	case map[string]any:
 		filtered := make(map[string]any)
 		for k, val := range v {
+			if pt, ok := val.(*time.Time); ok && pt == nil {
+				continue
+			}
 			if val != nil {
 				filtered[k] = val
 			}
@@ -382,15 +385,15 @@ func (qb *QueryBuilder) Insert(ctx context.Context, data any) error {
 		}
 		filtered := make(map[string]any)
 		for k, val := range content {
+			if pt, ok := val.(*time.Time); ok && pt == nil {
+				continue
+			}
 			if val != nil {
 				filtered[k] = val
 			}
 		}
 		content = filtered
 	}
-
-	content["created_at"] = time.Now()
-	content["updated_at"] = time.Now()
 
 	fields := make([]string, 0, len(content))
 	values := make(map[string]any, len(content))
@@ -399,15 +402,11 @@ func (qb *QueryBuilder) Insert(ctx context.Context, data any) error {
 		values[k] = v
 	}
 
-	sql := "CREATE " + qb.table + " SET "
-	for i, f := range fields {
-		if i > 0 {
-			sql += ", "
-		}
-		sql += f + " = $" + f
+	if len(fields) == 0 {
+		return nil
 	}
-
-	_, err := qb.db.execQuery(ctx, sql, values)
+	sql := "CREATE " + qb.table + " CONTENT $data"
+	_, err := qb.db.execQuery(ctx, sql, map[string]any{"data": values})
 	return err
 }
 

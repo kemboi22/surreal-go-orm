@@ -3,6 +3,7 @@ package surrealgoorm
 import (
 	"context"
 	"fmt"
+	"log"
 	"reflect"
 	"strings"
 	"time"
@@ -584,6 +585,12 @@ func setValue(fieldVal reflect.Value, val any) {
 		fieldVal.SetBool(toBool(val))
 	case reflect.String:
 		fieldVal.SetString(toString(val))
+	case reflect.Struct:
+		if cd, ok := val.(models.CustomDateTime); ok {
+			fieldVal.Set(reflect.ValueOf(cd.Time))
+		} else {
+			fieldVal.Set(reflect.ValueOf(val))
+		}
 	default:
 		fieldVal.Set(reflect.ValueOf(val))
 	}
@@ -672,14 +679,6 @@ func structToMap(s any) (map[string]any, error) {
 		}
 
 		fieldValue := valueByIndexPath(v, field.IndexPath)
-		if fieldValue.Kind() == reflect.Struct {
-			if fieldValue.Type() == reflect.TypeOf(time.Time{}) {
-				ts := fieldValue.Interface().(time.Time)
-				if ts.IsZero() {
-					continue
-				}
-			}
-		}
 
 		value := fieldValue.Interface()
 		result[field.Column] = value
@@ -706,10 +705,18 @@ func updateContentMap(data any) (map[string]any, error) {
 
 		filtered := make(map[string]any, len(content))
 		for key, value := range content {
-			if value != nil && key != "id" && key != "created_at" {
-				filtered[key] = value
+			if key == "id" || key == "created_at" {
+				continue
 			}
+			if value == nil {
+				continue
+			}
+			if ts, ok := value.(time.Time); ok && ts.IsZero() {
+				continue
+			}
+			filtered[key] = value
 		}
+		log.Printf("DEBUG updateContentMap: filtered = %v", filtered)
 		return filtered, nil
 	}
 }
@@ -1081,10 +1088,29 @@ func Create[T any](ctx context.Context, db *DB, model *T) error {
 
 	filtered := make(map[string]any)
 	for k, v := range content {
-		if v != nil {
-			filtered[k] = v
+		if k == "created_at" || k == "updated_at" {
+			continue
 		}
+		if v == nil {
+			continue
+		}
+		if ts, ok := v.(time.Time); ok && ts.IsZero() {
+			continue
+		}
+		if pt, ok := v.(*time.Time); ok && pt != nil && (*pt).IsZero() {
+			continue
+		}
+		filtered[k] = v
 	}
+
+	_ = filtered // silence unused warning
+	log.Printf("DEBUG: filtered keys = %v", func() map[string]any {
+		m := make(map[string]any)
+		for k := range filtered {
+			m[k] = k
+		}
+		return m
+	}())
 
 	table := GetTableName(model)
 
@@ -1097,7 +1123,22 @@ func Create[T any](ctx context.Context, db *DB, model *T) error {
 		idVal := idField.Interface()
 		if rid, ok := idVal.(models.RecordID); ok && rid.String() != "" {
 			existing, _ := selectRecord[any](ctx, db, rid)
+			log.Printf("DEBUG Create: existing=%v, recordID=%s, keys=%v", existing != nil, rid.String(), func() []string {
+				var keys []string
+				for k := range filtered {
+					keys = append(keys, k)
+				}
+				return keys
+			}())
 			if existing != nil {
+				if rec, ok := (*existing).(map[string]any); ok {
+					if ca, ok := rec["created_at"]; ok {
+						filtered["created_at"] = ca
+					}
+					if ua, ok := rec["updated_at"]; ok {
+						filtered["updated_at"] = ua
+					}
+				}
 				_, err = updateRecord[any](ctx, db, rid, filtered)
 				if err != nil {
 					return err
@@ -1111,10 +1152,6 @@ func Create[T any](ctx context.Context, db *DB, model *T) error {
 			return callAfterCreate(ctx, db, model)
 		}
 	}
-
-	now := time.Now()
-	filtered["created_at"] = now
-	filtered["updated_at"] = now
 
 	_, err = createRecord[any](ctx, db, models.Table(table), filtered)
 	if err != nil {
@@ -1134,21 +1171,39 @@ func Update[T any](ctx context.Context, db *DB, model *T) error {
 
 	filtered := make(map[string]any)
 	for k, v := range content {
-		if v != nil && k != "id" && k != "created_at" {
-			filtered[k] = v
+		if k == "id" || k == "created_at" {
+			continue
 		}
+		if v == nil {
+			continue
+		}
+		if ts, ok := v.(time.Time); ok && ts.IsZero() {
+			continue
+		}
+		if pt, ok := v.(*time.Time); ok && pt != nil && (*pt).IsZero() {
+			continue
+		}
+		filtered[k] = v
 	}
 
 	filtered["updated_at"] = time.Now()
 
 	v := reflect.ValueOf(model)
-	if v.Kind() == reflect.Ptr {
+	if v.Kind() == reflect.Pointer {
 		v = v.Elem()
 	}
 	idField := v.FieldByName("ID")
 	if idField.IsValid() && !idField.IsZero() {
 		idVal := idField.Interface()
 		if rid, ok := idVal.(models.RecordID); ok && rid.String() != "" {
+			existing, _ := selectRecord[any](ctx, db, rid)
+			if existing != nil {
+				if rec, ok := (*existing).(map[string]any); ok {
+					if ca, ok := rec["created_at"]; ok {
+						filtered["created_at"] = ca
+					}
+				}
+			}
 			_, err = updateRecord[any](ctx, db, rid, filtered)
 			if err != nil {
 				return err

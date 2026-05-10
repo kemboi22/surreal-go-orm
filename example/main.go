@@ -18,6 +18,7 @@ type User struct {
 	Email string `orm:"column:email"`
 	Age   int    `orm:"column:age"`
 	Posts []Post `orm:"has_many:posts;foreign_key:author_id"`
+	surrealgoorm.Timestamps
 }
 
 func (User) TableName() string {
@@ -134,7 +135,16 @@ func runCRUD(ctx context.Context, db *surrealgoorm.DB) {
 		Age:   30,
 	}
 
+	user1 := &User{
+		Model: surrealgoorm.Model{ID: models.NewRecordID("users", "kemboi")},
+		Name:  "Kemboi ELvis",
+		Email: "kemboielvis22@gmail.com",
+		Age:   22,
+	}
 	if err := surrealgoorm.Create(ctx, db, user); err != nil {
+		log.Printf("create failed: %v", err)
+	}
+	if err := surrealgoorm.Create(ctx, db, user1); err != nil {
 		log.Printf("create failed: %v", err)
 	}
 

@@ -2,6 +2,8 @@ package surrealgoorm
 
 import (
 	"context"
+	"sort"
+	"strings"
 
 	"github.com/surrealdb/surrealdb.go"
 	"github.com/surrealdb/surrealdb.go/contrib/surrealql"
@@ -16,7 +18,8 @@ type QueryBuilder[T any] interface {
 	OrderBy(column string) QueryBuilder[T]
 	Limit(limit int) QueryBuilder[T]
 	With(relations ...string) QueryBuilder[T]
-	ToSQL() (string, map[string]any)
+	ToSQL() string
+	ToBuildSQL() (string, map[string]any)
 	First(ctx context.Context) (*T, error)
 	Get(ctx context.Context) (*[]T, error)
 }
@@ -72,10 +75,28 @@ func (m Model[T]) With(relations ...string) QueryBuilder[T] {
 	}
 	return m
 }
-
-func (m Model[T]) ToSQL() (string, map[string]any) {
+func (m Model[T]) ToBuildSQL() (string, map[string]any) {
 	sql, vars := m.sq.Build()
 	return sql, vars
+}
+
+func (m Model[T]) ToSQL() string {
+	sql, vars := m.sq.Build()
+	if len(vars) == 0 {
+		return sql
+	}
+	keys := make([]string, 0, len(vars))
+	for k := range vars {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return len(keys[i]) > len(keys[j])
+	})
+	replParts := make([]string, 0, len(vars)*2)
+	for _, k := range keys {
+		replParts = append(replParts, k, formatValue(vars[k]))
+	}
+	return strings.NewReplacer(replParts...).Replace(sql)
 }
 func (m Model[T]) First(ctx context.Context) (*T, error) {
 	sql, vars := m.sq.Build()

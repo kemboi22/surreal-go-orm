@@ -15,7 +15,8 @@ type QueryBuilder[T any] interface {
 	WhereNull(column string) QueryBuilder[T]
 	OrderBy(column string) QueryBuilder[T]
 	Limit(limit int) QueryBuilder[T]
-	ToSQL() string
+	With(relations ...string) QueryBuilder[T]
+	ToSQL() (string, map[string]any)
 	First(ctx context.Context) (*T, error)
 	Get(ctx context.Context) (*[]T, error)
 }
@@ -64,9 +65,17 @@ func (m Model[T]) Limit(limit int) QueryBuilder[T] {
 	m.sq.Limit(limit)
 	return m
 }
-func (m Model[T]) ToSQL() string {
-	sql, _ := m.sq.Build()
-	return sql
+
+func (m Model[T]) With(relations ...string) QueryBuilder[T] {
+	for r := range relations {
+		m.sq.Fetch(relations[r])
+	}
+	return m
+}
+
+func (m Model[T]) ToSQL() (string, map[string]any) {
+	sql, vars := m.sq.Build()
+	return sql, vars
 }
 func (m Model[T]) First(ctx context.Context) (*T, error) {
 	sql, vars := m.sq.Build()

@@ -181,20 +181,54 @@ Define migrations by implementing the `Migration` interface:
 ```go
 type CreateUserTable struct{}
 
-func (m CreateUserTable) Name() string { return "create_user_table" }
+func (m CreateUserTable) Name() string { return "001_create_user_table" }
 
-func (m CreateUserTable) Up(ctx context.Context, db *surrealdb.DB) error {
-    _, err := db.Query("DEFINE TABLE user SCHEMAFULL ...", nil)
-    return err
+func (m CreateUserTable) Up(ctx context.Context, schema surrealgoorm.Schema) error {
+    return schema.CreateTable(ctx, "user", func(t *surrealgoorm.Table) {
+        t.ID()
+        t.String("name")
+        t.String("email").Unique()
+        t.Timestamps()
+    })
 }
 
-func (m CreateUserTable) Down(ctx context.Context, db *surrealdb.DB) error {
-    _, err := db.Query("REMOVE TABLE user;", nil)
+func (m CreateUserTable) Down(ctx context.Context, schema surrealgoorm.Schema) error {
+    _, err := surrealdb.Query[any](ctx, schema.Db, "REMOVE TABLE user;", nil)
     return err
 }
 ```
 
-The library provides the interface but no migration runner — you supply your own.
+### Auto Migration Runner
+
+The `migrator` sub-package provides an `AutoMigrator` to run migrations sequentially:
+
+```go
+import (
+    "context"
+    "github.com/surrealdb/surrealdb.go"
+    surrealgoorm "github.com/kemboi22/surreal-go-orm"
+    "github.com/kemboi22/surreal-go-orm/migrator"
+)
+
+func main() {
+    db, err := surrealdb.New("ws://localhost:8000/rpc")
+    if err != nil {
+        panic(err)
+    }
+    defer db.Close()
+
+    m := migrator.NewAutoMigrator(db)
+    err = m.AutoMigrate(context.Background(), []surrealgoorm.Migration{
+        CreateUserTable{},
+        CreatePostsTable{},
+    })
+    if err != nil {
+        panic(err)
+    }
+}
+```
+
+`AutoMigrator` runs each migration's `Up` in order and stops at the first error.
 
 ## API Reference
 

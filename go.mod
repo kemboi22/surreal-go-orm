@@ -1,6 +1,6 @@
 module github.com/kemboi22/surreal-go-orm
 
-go 1.26.1
+go 1.26.3
 
 require github.com/surrealdb/surrealdb.go v1.4.0
 

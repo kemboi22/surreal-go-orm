@@ -7,7 +7,7 @@ import (
 )
 
 type Schema struct {
-	db *surrealdb.DB
+	Db *surrealdb.DB
 }
 
 func (s Schema) CreateTable(ctx context.Context, name string, fn func(*Table)) error {

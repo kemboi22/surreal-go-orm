@@ -39,7 +39,9 @@ func Query[T any](db *surrealdb.DB, table string) QueryBuilder[T] {
 }
 
 func (m Model[T]) Select(columns ...string) QueryBuilder[T] {
-	m.sq.Fields(columns)
+	for _, col := range columns {
+		m.sq.Fields(col)
+	}
 	return m
 }
 

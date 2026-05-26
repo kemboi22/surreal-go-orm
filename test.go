@@ -3,14 +3,9 @@ package surrealgoorm
 import (
 	"context"
 	"log"
-
-	"github.com/surrealdb/surrealdb.go"
 )
 
-func Up() {
-	schema := Schema{
-		db: &surrealdb.DB{},
-	}
+func Up(schema Schema) {
 	err := schema.CreateTable(context.Background(), "users", func(t *Table) {
 		t.String("name")
 		t.String("email").Unique()

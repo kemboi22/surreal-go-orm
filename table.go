@@ -71,7 +71,7 @@ func (t *Table) Timestamps() {
 
 func (t *Table) Build() string {
 	var parts []string
-	parts = append(parts, fmt.Sprintf("DEFINE TABLE %s SCHEMAFULL", t.Name))
+	parts = append(parts, fmt.Sprintf("DEFINE TABLE %s SCHEMAFULL;", t.Name))
 	for _, col := range t.Columns {
 		field := fmt.Sprintf("DEFINE FIELD %s ON %s type %s", col.Name, t.Name, col.Type)
 		if col.Optional {

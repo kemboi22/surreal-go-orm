@@ -74,7 +74,7 @@ func TestAutoMigrateMultipleModels(t *testing.T) {
 	}
 }
 
-func TestAutoMigrateStopsOnError(t *testing.T) {
+func TestAutoMigrateContinuesOnError(t *testing.T) {
 	m := NewAutoMigrator(nil)
 	m1 := &mockMigration{name: "001", upErr: assertAnError}
 	m2 := &mockMigration{name: "002"}
@@ -83,8 +83,8 @@ func TestAutoMigrateStopsOnError(t *testing.T) {
 	if err == nil {
 		t.Error("AutoMigrate should return error when a migration fails")
 	}
-	if m2.upCalled {
-		t.Error("AutoMigrate should stop after first error, but m2 was called")
+	if !m2.upCalled {
+		t.Error("AutoMigrate should continue after an error, but m2 was not called")
 	}
 }
 

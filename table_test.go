@@ -176,8 +176,8 @@ func TestTableBuildWithNullable(t *testing.T) {
 	table.String("nickname").Nullable()
 
 	got := table.Build()
-	if !strings.Contains(got, "DEFINE FIELD nickname ON users type string FLEXIBLE;") {
-		t.Error("Build() should add FLEXIBLE for nullable columns")
+	if !strings.Contains(got, "DEFINE FIELD nickname ON users type string;") {
+		t.Error("Build() should not add FLEXIBLE for scalar nullable columns")
 	}
 }
 
@@ -218,13 +218,14 @@ func TestTableBuildWithDefaultBool(t *testing.T) {
 func TestTableBuildAllModifiers(t *testing.T) {
 	table := &Table{Name: "products"}
 	table.String("sku").Unique().Nullable().Default("N/A")
+	table.Object("meta").Nullable()
 
 	got := table.Build()
 	if !strings.Contains(got, "DEFINE INDEX sku_unique") {
 		t.Error("Build() should contain unique index")
 	}
-	if !strings.Contains(got, "FLEXIBLE") {
-		t.Error("Build() should contain FLEXIBLE")
+	if !strings.Contains(got, "type object FLEXIBLE") {
+		t.Error("Build() should contain FLEXIBLE for object fields")
 	}
 	if !strings.Contains(got, "DEFAULT 'N/A'") {
 		t.Error("Build() should contain DEFAULT")
@@ -298,7 +299,7 @@ func TestTableEmptyName(t *testing.T) {
 func TestTableNoColumns(t *testing.T) {
 	table := &Table{Name: "empty"}
 	got := table.Build()
-	if got != "DEFINE TABLE empty SCHEMAFULL" {
+	if got != "DEFINE TABLE empty SCHEMAFULL;" {
 		t.Errorf("Build() with no columns should only have table definition, got:\n%s", got)
 	}
 }

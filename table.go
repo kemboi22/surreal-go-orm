@@ -73,14 +73,18 @@ func (t *Table) Build() string {
 	var parts []string
 	parts = append(parts, fmt.Sprintf("DEFINE TABLE %s SCHEMAFULL;", t.Name))
 	for _, col := range t.Columns {
+		if col.Name == "id" {
+			continue
+		}
 		field := fmt.Sprintf("DEFINE FIELD %s ON %s type %s", col.Name, t.Name, col.Type)
-		if col.Optional {
+		if col.Optional && strings.Contains(col.Type, "object") {
 			field += " FLEXIBLE"
 		}
 		if col.DefaultValue != nil {
 			field += fmt.Sprintf(" DEFAULT %v", formatValue(col.DefaultValue))
 		}
 		field += ";"
+		parts = append(parts, field)
 		if col.IsUnique {
 			parts = append(parts, fmt.Sprintf(`
 			DEFINE INDEX %s_unique 
@@ -88,7 +92,6 @@ func (t *Table) Build() string {
 			FIELDS %s UNIQUE;
 			`, col.Name, t.Name, col.Name))
 		}
-		parts = append(parts, field)
 	}
 	return strings.Join(parts, "\n")
 }

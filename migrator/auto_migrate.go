@@ -2,6 +2,8 @@ package migrator
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	surrealgoorm "github.com/kemboi22/surreal-go-orm"
 	"github.com/surrealdb/surrealdb.go"
@@ -21,10 +23,11 @@ func (migrator *AutoMigrator) AutoMigrate(ctx context.Context, models []surrealg
 	schema := &surrealgoorm.Schema{
 		Db: migrator.Db,
 	}
+	var errs error
 	for _, m := range models {
 		if err := m.Up(ctx, *schema); err != nil {
-			return err
+			errs = errors.Join(errs, fmt.Errorf("%s: %w", m.Name(), err))
 		}
 	}
-	return nil
+	return errs
 }

@@ -76,11 +76,20 @@ func (t *Table) Build() string {
 		if col.Name == "id" {
 			continue
 		}
-		field := fmt.Sprintf("DEFINE FIELD %s ON %s type %s", col.Name, t.Name, col.Type)
-		if col.Optional && strings.Contains(col.Type, "object") {
-			field += " FLEXIBLE"
+		colType := col.Type
+		if col.Optional && col.DefaultValue == nil && !strings.Contains(col.Type, "object") {
+			// Optional field with no default: represent as option<T> so an
+			// omitted value is allowed by SurrealDB's SCHEMAFULL fields.
+			colType = "option<" + colType + ">"
 		}
-		if col.DefaultValue != nil {
+		field := fmt.Sprintf("DEFINE FIELD %s ON %s type %s", col.Name, t.Name, colType)
+		// An optional field with an explicit default keeps that default.
+		switch {
+		case col.Optional && col.DefaultValue != nil:
+			field += fmt.Sprintf(" DEFAULT %v", formatValue(col.DefaultValue))
+		case col.Optional && strings.Contains(col.Type, "object"):
+			field += " FLEXIBLE"
+		case col.DefaultValue != nil:
 			field += fmt.Sprintf(" DEFAULT %v", formatValue(col.DefaultValue))
 		}
 		field += ";"

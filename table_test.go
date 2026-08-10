@@ -176,8 +176,8 @@ func TestTableBuildWithNullable(t *testing.T) {
 	table.String("nickname").Nullable()
 
 	got := table.Build()
-	if !strings.Contains(got, "DEFINE FIELD nickname ON users type string;") {
-		t.Error("Build() should not add FLEXIBLE for scalar nullable columns")
+	if !strings.Contains(got, "DEFINE FIELD nickname ON users type option<string>;") {
+		t.Error("Build() should emit option<string> for scalar nullable columns")
 	}
 }
 

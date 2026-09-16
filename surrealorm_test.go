@@ -6,9 +6,8 @@ import (
 )
 
 func TestQueryCreatesModel(t *testing.T) {
-	qb := Query[any](nil, "users")
-	model, ok := qb.(*Model[any])
-	if !ok {
+	model := Query[any](nil, "users")
+	if model == nil {
 		t.Fatal("Query() should return a *Model")
 	}
 	if model.table != "users" {
@@ -96,13 +95,11 @@ func TestQueryLimit(t *testing.T) {
 	}
 }
 
-func TestQueryWith(t *testing.T) {
+func TestQueryWithNames(t *testing.T) {
 	qb := Query[any](nil, "users")
-	sqlBefore := qb.ToSQL()
-	qb = qb.With("posts", "comments")
-	sqlAfter := qb.ToSQL()
-	if sqlBefore == sqlAfter {
-		t.Error("ToSQL() with With() should modify the query")
+	qb = qb.WithNames("posts", "comments")
+	if qb.state.err == nil {
+		t.Error("WithNames on type without relations should set an error")
 	}
 }
 

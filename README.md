@@ -2,6 +2,8 @@
 
 A lightweight, type-safe ORM for [SurrealDB](https://surrealdb.com/) built on top of the official Go client (`github.com/surrealdb/surrealdb.go`).
 
+Inspired by [Laravel Eloquent](https://laravel.com/docs/eloquent): fluent query builder, active-record-style CRUD, auto timestamps, soft deletes, mass assignment, observers, aggregates and pagination.
+
 ## Installation
 
 ```bash
@@ -22,7 +24,7 @@ import (
 )
 
 type User struct {
-    ID    string `json:"id"`
+    ID    string `json:"id,omitempty"`
     Name  string `json:"name"`
     Email string `json:"email"`
 }
@@ -32,19 +34,21 @@ func main() {
     if err != nil {
         panic(err)
     }
-    defer db.Close()
-
-    _, err = db.SignIn(&surrealdb.Auth{User: "root", Pass: "root"})
-    if err != nil {
-        panic(err)
-    }
-
-    _, err = db.Use("namespace", "database")
-    if err != nil {
-        panic(err)
-    }
-
     ctx := context.Background()
+    defer db.Close(ctx)
+
+    _, err = db.SignIn(ctx, surrealdb.Auth{
+        Username: "root",
+        Password: "root",
+    })
+    if err != nil {
+        panic(err)
+    }
+
+    _, err = db.Use(ctx, "namespace", "database")
+    if err != nil {
+        panic(err)
+    }
 
     user, err := surrealgoorm.Query[User](db, "user").
         WhereEq("email", "alice@example.com").
@@ -56,21 +60,369 @@ func main() {
 }
 ```
 
+## Eloquent-style CRUD
+
+Models are plain structs. The `id` field, `created_at`, `updated_at` and `deleted_at` fields are recognised by their JSON tag.
+
+```go
+type User struct {
+    ID        string     `json:"id,omitempty"`
+    Name      string     `json:"name"`
+    Email     string     `json:"email"`
+    CreatedAt time.Time  `json:"created_at"`
+    UpdatedAt time.Time  `json:"updated_at"`
+    DeletedAt *time.Time `json:"deleted_at"` // enables soft deletes
+}
+```
+
+### Creating
+
+```go
+u := &User{Name: "Alice", Email: "alice@example.com"}
+created, err := surrealgoorm.Query[User](db, "user").Create(ctx, u)
+// created.ID, created.CreatedAt, created.UpdatedAt are populated
+
+// bulk insert
+users, err := surrealgoorm.Query[User](db, "user").CreateMany(ctx, []User{...})
+
+// create from a map (respects fillable/guarded, see Mass Assignment)
+u, err := surrealgoorm.Query[User](db, "user").CreateFromMap(ctx, map[string]any{
+    "name": "Bob", "email": "bob@example.com",
+})
+
+// create with an explicit record id
+u, err := surrealgoorm.Query[User](db, "user").CreateWithID(ctx, "bob", &User{Name: "Bob"})
+```
+
+### Reading
+
+```go
+user, err := q.Find(ctx, "user:abc123")   // by record id (accepts "abc123", "user:abc123" or models.RecordID)
+user, err := q.FindOrFail(ctx, "abc123")  // returns ErrNotFound when missing
+user, err := q.WhereEq("email", "x@y.com").First(ctx)
+users, err := q.OrderBy("name").Limit(10).Get(ctx)
+```
+
+### Find or create
+
+```go
+// search by email, otherwise create with the extra attributes
+user, err := q.FirstOrCreate(ctx,
+    map[string]any{"email": "dave@example.com"},
+    map[string]any{"name": "Dave"},
+)
+
+// like FirstOrCreate but returns a new (unsaved) model instead of persisting
+model, err := q.FirstOrNew(ctx, map[string]any{"email": "dave@example.com"})
+
+// find by attrs, update if found, create otherwise
+user, err := q.UpdateOrCreate(ctx,
+    map[string]any{"email": "dave@example.com"},
+    map[string]any{"name": "Dave"},
+)
+```
+
+### Updating
+
+```go
+user, err := q.Update(ctx, id, map[string]any{"name": "Dave"}) // SET-based update, bumps updated_at
+
+// update matching records based on the current WHERE clauses
+updated, err := q.WhereEq("is_active", false).UpdateWhere(ctx, map[string]any{"is_active": true})
+
+// insert-or-update a whole model (creates when it has no id, updates otherwise)
+user, err := q.Save(ctx, user)
+```
+
+### Deleting
+
+```go
+err := q.Delete(ctx, id)        // soft delete when the model has a deleted_at field
+err := q.DeleteWhere(ctx)       // deletes everything matching the current WHERE clauses
+err := q.ForceDelete(ctx, id)   // permanent delete
+err := q.Restore(ctx, id)       // clear deleted_at
+err := q.Truncate(ctx)          // delete every record in the table
+```
+
+## Soft Deletes
+
+When your struct has a `deleted_at` field, the ORM automatically:
+
+- filters `deleted_at IS NONE` on every `Get`, `First`, `Find`, `Count`, `Exists` and `Paginate`;
+- turns `Delete` / `DeleteWhere` into a soft delete.
+
+```go
+q := surrealgoorm.Query[User](db, "user")
+q.Delete(ctx, id)               // sets deleted_at
+
+q.Find(ctx, id)                 // nil – excluded by default
+q.WithTrashed().Find(ctx, id)   // found
+q.OnlyTrashed().Find(ctx, id)   // only trashed records
+q.Restore(ctx, id)              // bring it back
+```
+
+## Timestamps
+
+If the model has `created_at` / `updated_at` fields (any of `time.Time`, `*time.Time` or `string`), they are set automatically:
+
+- `Create` sets both.
+- `Update`, `Save` and `UpdateWhere` bump `updated_at`.
+
+Use `schema.Table.Timestamps()` to define matching columns, or define them manually.
+
+## Mass Assignment
+
+Control which keys `CreateFromMap`, `FirstOrCreate`, `FirstOrNew` and `UpdateOrCreate` may assign using the `orm` struct tag:
+
+```go
+type User struct {
+    Name     string `json:"name"`     // always assigned
+    Email    string `json:"email" orm:"fillable"` // only assigned when fillable is defined
+    Password string `json:"password" orm:"guarded"` // never assigned from maps
+}
+```
+
+- When any field is tagged `orm:"fillable"`, only fillable fields are assigned.
+- Otherwise, any field tagged `orm:"guarded"` is excluded.
+
+## Observers (Model Events)
+
+Implement one of these interfaces on your model to hook into the lifecycle:
+
+| Event    | Interface        | When                              |
+|----------|------------------|-----------------------------------|
+| Saving   | `SavingHook`     | before create or update           |
+| Creating | `CreatingHook`   | before create                     |
+| Updating | `UpdatingHook`   | before update                     |
+| Deleting | `DeletingHook`   | before delete                     |
+| Created  | `CreatedHook`    | after create                      |
+| Updated  | `UpdatedHook`    | after update                      |
+| Deleted  | `DeletedHook`    | after delete                      |
+| Saved    | `SavedHook`      | after create or update            |
+
+Pre-save hooks can abort the operation by returning a non-nil error.
+
+```go
+func (u *User) Creating() error {
+    if u.Email == "" {
+        return errors.New("email is required")
+    }
+    return nil
+}
+
+func (u *User) Saved() {
+    fmt.Println("user persisted:", u.ID)
+}
+```
+
+## Aggregates
+
+```go
+count, err := q.WhereEq("is_active", true).Count(ctx)
+exists, err := q.Exists(ctx)
+total, err := q.Sum(ctx, "price")
+avg,   err := q.Avg(ctx, "price")
+min,   err := q.Min(ctx, "price")
+max,   err := q.Max(ctx, "price")
+```
+
+Aggregates respect the current WHERE clauses and the soft-delete scope.
+
+## Pagination
+
+```go
+page, err := q.OrderBy("name").Paginate(ctx, 2, 15)
+// page.Data []T, page.Total, page.PerPage, page.CurrentPage, page.LastPage, page.From, page.To
+```
+
+## Relationships
+
+Declare relations on the struct with `orm` tags, then hydrate them with typed `With[R]()` (Go 1.27+). Prefer that over calling `HasMany` inside a loop (N+1).
+
+```go
+type User struct {
+    ID      string   `json:"id,omitempty"`
+    Name    string   `json:"name"`
+    Posts   []Post   `json:"posts,omitempty" orm:"has_many,table:post,fk:user_id"`
+    Profile *Profile `json:"profile,omitempty" orm:"has_one,table:profile,fk:user_id"`
+}
+
+type Post struct {
+    ID     string `json:"id,omitempty"`
+    Title  string `json:"title"`
+    UserID string `json:"user_id"`
+    User   *User  `json:"user,omitempty" orm:"belongs_to,table:user,fk:user_id"`
+}
+
+type Profile struct {
+    ID     string `json:"id,omitempty"`
+    Bio    string `json:"bio"`
+    UserID string `json:"user_id"`
+}
+
+users, err := surrealgoorm.Query[User](db, "user").With[[]Post]().Get(ctx)
+for _, u := range *users {
+    for _, p := range u.Posts { // typed []Post
+        _ = p.Title
+    }
+}
+
+post, err := surrealgoorm.Query[Post](db, "post").With[*User]().First(ctx)
+_ = post.User.Name
+
+// chain distinct relation types
+users, err = surrealgoorm.Query[User](db, "user").
+    With[[]Post]().
+    With[*Profile]().
+    Get(ctx)
+```
+
+`With[R]()` lives on `*Model[T]` (interfaces cannot declare generic methods). It picks the unique field on `T` whose type is `R`. If two fields share that type, disambiguate with `WithField`:
+
+```go
+users, err := surrealgoorm.Query[User](db, "user").
+    WithField[[]Post]("Drafts").
+    Get(ctx)
+```
+
+`WithNames` is the non-generic fallback (Go/json field names) and is the method on `QueryBuilder[T]`:
+
+```go
+users, err := surrealgoorm.Query[User](db, "user").
+    WithNames("Posts", "Profile").
+    Get(ctx)
+```
+
+| Tag | Meaning |
+|-----|---------|
+| `has_many,table:T,fk:F` | Child table `T`, FK column `F` on the child pointing at parent `id` |
+| `has_one,table:T,fk:F` | Same as has_many, take the first related row (or empty) |
+| `belongs_to,table:T,fk:F` | FK `F` on **this** record → load parent from table `T` |
+| `fetch` | SurrealDB record-link field; parent `SELECT` uses `FETCH <jsonName>` |
+
+FK-style tags require `table` and `fk`. Relation fields are omitted from `Create`/`Update` maps so nested graphs are not persisted.
+
+Record-link example:
+
+```go
+type User struct {
+    ID    string `json:"id,omitempty"`
+    Name  string `json:"name"`
+    Posts []Post `json:"posts,omitempty" orm:"fetch"`
+}
+
+users, err := surrealgoorm.Query[User](db, "user").With[[]Post]().Get(ctx)
+```
+
+Graph edges still use `Relate`:
+
+```go
+edge, err := q.Relate(ctx,
+    models.NewRecordID("user", "alice"),
+    "likes",
+    models.NewRecordID("post", "p1"),
+    map[string]any{"kind": "like"},
+)
+```
+
+### HasMany / HasOne / BelongsTo
+
+Foreign-key style relationships use a column on the child table that holds the
+parent's id (e.g. `post.user_id`). Chain a query that is already narrowed to the
+record(s) you care about into a generic method:
+
+```go
+// all posts written by Alice
+posts, err := surrealgoorm.Query[User](db, "user").
+    WhereEq("name", "Alice").
+    HasMany[Post](ctx, "post", "user_id")
+
+// the author of a post (matched against the parent's id field)
+author, err := surrealgoorm.Query[Post](db, "post").
+    WhereEq("title", "Hello").
+    BelongsTo[User](ctx, "user", "user_id")
+```
+
+`HasOne` behaves like `HasMany` but returns a single record:
+
+```go
+post, err := surrealgoorm.Query[User](db, "user").
+    WhereEq("name", "Bob").
+    HasOne[Post](ctx, "post", "user_id")
+```
+
+Package-level `HasMany` / `HasOne` / `BelongsTo` functions remain available but
+are deprecated in favor of the fluent methods above.
+
+### Associate / Dissociate
+
+`Associate` points a child record at a parent by setting its foreign key,
+`Dissociate` clears it (sets it to `NONE`):
+
+```go
+updated, err := surrealgoorm.Query[Post](db, "post").
+    WhereEq("title", "Hello").
+    Associate(ctx, "user_id", bob) // *User
+
+cleared, err := surrealgoorm.Query[Post](db, "post").
+    WhereEq("title", "Hello").
+    Dissociate(ctx, "user_id")
+```
+
+Note: when querying by record id, pass a `models.RecordID` (or use `Find`) — a
+plain string like `"user:abc"` is not automatically cast to a record id in
+SurrealDB comparisons.
+
+## Transactions
+
+Interactive transactions run multiple ORM operations atomically. They require a
+WebSocket connection (SurrealDB v3+).
+
+```go
+tx, err := surrealgoorm.Begin(ctx, db)
+if err != nil {
+    return err
+}
+defer tx.Cancel(ctx) // cancel if not committed
+
+user, err := tx.Query[User]("user").Create(ctx, &User{Name: "Alice"})
+if err != nil {
+    return err
+}
+if _, err := tx.Query[Post]("post").Create(ctx, &Post{Title: "Hello", UserID: user.ID}); err != nil {
+    return err
+}
+
+return tx.Commit(ctx)
+```
+
+Every `tx.Query` operation runs inside the transaction; nothing is visible
+outside it until `Commit` is called, and `Cancel` discards all changes.
+
+- `Begin(ctx, db)` — start a transaction (returns `*Transaction`)
+- `(*Transaction).Commit(ctx)` — make changes permanent
+- `(*Transaction).Cancel(ctx)` — discard changes (safe to call multiple times)
+- `(*Transaction).IsClosed()` — whether the transaction is done
+- `(*Transaction).Raw(ctx, sql, vars)` — run raw SurrealQL inside the transaction
+- `(*Transaction).Query[T](table)` — ORM builder scoped to the transaction
+- `QueryTx[T](tx, table)` — deprecated alias for `tx.Query[T](table)`
+
+Calling `Commit` or `Cancel` after the transaction is already closed returns
+`ErrTransactionClosed`.
+
 ## Query Builder
 
-The core feature is a fluent, generic query builder for SELECT queries.
+The core is a fluent, generic query builder. Chain methods return `*Model[T]`
+so you can keep chaining and call Go 1.27 generic methods (e.g. `With[R]`, `HasMany[R]`).
+`*Model[T]` still implements `QueryBuilder[T]`. Generic methods are not on the interface.
 
 ### Constructor
 
 ```go
-surrealgoorm.Query[T](db, "table_name")
+surrealgoorm.Query[T](db, "table_name") // returns *Model[T]
 ```
 
-Returns a `QueryBuilder[T]` for the given table, where `T` is your Go struct type.
-
 ### Methods
-
-All builder methods return `QueryBuilder[T]` for method chaining.
 
 | Method | Description |
 |--------|-------------|
@@ -79,11 +431,16 @@ All builder methods return `QueryBuilder[T]` for method chaining.
 | `WhereEq(column string, value any)` | Shorthand for equality WHERE |
 | `WhereNotNull(column string)` | WHERE field IS NOT NULL |
 | `WhereNull(column string)` | WHERE field IS NULL |
+| `WhereIn(column string, values []any)` | WHERE field IN (values) |
 | `OrderBy(column string)` | Add ORDER BY |
 | `Limit(limit int)` | Add LIMIT |
-| `With(relations ...string)` | Add FETCH clause for eager-loading related records |
-| `ToSQL()` | Returns the generated SurrealQL string with parameters inlined (useful for debugging) |
-| `ToBuildSql` | Returns SQL and Vars for surrealql |
+| `With[R]()` | Eager-load the unique relation field of type `R` (`*Model[T]` only) |
+| `WithField[R](name)` | Eager-load a named relation, checking type `R` (`*Model[T]` only) |
+| `WithNames(relations ...string)` | Eager-load relations by Go or json field name |
+| `WithTrashed()` | Include soft-deleted records |
+| `OnlyTrashed()` | Only soft-deleted records |
+| `ToSQL()` | Returns the generated SurrealQL string with parameters inlined |
+| `ToBuildSQL()` | Returns SQL and vars for `surrealdb.Query` |
 | `First(ctx)` | Executes query, returns `*T` (nil if not found) |
 | `Get(ctx)` | Executes query, returns `*[]T` |
 
@@ -98,17 +455,11 @@ users, err := surrealgoorm.Query[User](db, "user").
     Limit(10).
     Get(ctx)
 
-// Get first match with related records (FETCH)
-user, err := surrealgoorm.Query[User](db, "user").
-    WhereEq("email", "bob@test.com").
-    With("posts", "profile").
-    First(ctx)
-
 // Debug generated SQL (parameters inlined)
 sql := surrealgoorm.Query[User](db, "user").
     WhereEq("email", "test@test.com").
     ToSQL()
-fmt.Println(sql) // SELECT * FROM user WHERE email = 'test@test.com'
+fmt.Println(sql) // SELECT * FROM user WHERE type::field('email') = 'test@test.com'
 ```
 
 ## Schema Builder
@@ -118,7 +469,7 @@ Define SurrealDB tables and columns using a DSL.
 ### Creating a Table
 
 ```go
-schema := surrealgoorm.Schema{db: db}
+schema := surrealgoorm.Schema{Db: db}
 
 err := schema.CreateTable(context.Background(), "user", func(t *surrealgoorm.Table) {
     t.ID()                          // record<user>
@@ -215,7 +566,7 @@ func main() {
     if err != nil {
         panic(err)
     }
-    defer db.Close()
+    defer db.Close(context.Background())
 
     m := migrator.NewAutoMigrator(db)
     err = m.AutoMigrate(context.Background(), []surrealgoorm.Migration{
@@ -232,35 +583,111 @@ func main() {
 
 ## API Reference
 
-### Interfaces
+### Interface
 
 ```go
 QueryBuilder[T any] interface {
-    Select(columns ...string) QueryBuilder[T]
-    Where(column, operator string, value any) QueryBuilder[T]
-    WhereEq(column string, value any) QueryBuilder[T]
-    WhereNotNull(column string) QueryBuilder[T]
-    WhereNull(column string) QueryBuilder[T]
-    OrderBy(column string) QueryBuilder[T]
-    Limit(limit int) QueryBuilder[T]
-    With(relations ...string) QueryBuilder[T]
+    Select(columns ...string) *Model[T]
+    Where(column, operator string, value any) *Model[T]
+    WhereEq(column string, value any) *Model[T]
+    WhereNotNull(column string) *Model[T]
+    WhereNull(column string) *Model[T]
+    WhereIn(column string, values []any) *Model[T]
+    OrderBy(column string) *Model[T]
+    Limit(limit int) *Model[T]
+    WithNames(relations ...string) *Model[T]
+    WithTrashed() *Model[T]
+    OnlyTrashed() *Model[T]
     ToSQL() string
+    ToBuildSQL() (string, map[string]any)
     First(ctx context.Context) (*T, error)
     Get(ctx context.Context) (*[]T, error)
+
+    Create(ctx context.Context, data *T) (*T, error)
+    CreateWithID(ctx context.Context, id any, data *T) (*T, error)
+    CreateMany(ctx context.Context, data []T) ([]T, error)
+    CreateFromMap(ctx context.Context, attrs map[string]any) (*T, error)
+    Find(ctx context.Context, id any) (*T, error)
+    FindOrFail(ctx context.Context, id any) (*T, error)
+    FirstOrCreate(ctx context.Context, attrs map[string]any, values ...map[string]any) (*T, error)
+    FirstOrNew(ctx context.Context, attrs map[string]any, values ...map[string]any) (*T, error)
+    UpdateOrCreate(ctx context.Context, attrs map[string]any, values map[string]any) (*T, error)
+    Save(ctx context.Context, model *T) (*T, error)
+    Update(ctx context.Context, id any, data map[string]any) (*T, error)
+    UpdateWhere(ctx context.Context, data map[string]any) ([]T, error)
+    Delete(ctx context.Context, id any) error
+    DeleteWhere(ctx context.Context) error
+    ForceDelete(ctx context.Context, id any) error
+    Restore(ctx context.Context, id any) error
+    Truncate(ctx context.Context) error
+
+    Count(ctx context.Context) (int, error)
+    Exists(ctx context.Context) (bool, error)
+    Sum(ctx context.Context, column string) (float64, error)
+    Avg(ctx context.Context, column string) (float64, error)
+    Min(ctx context.Context, column string) (float64, error)
+    Max(ctx context.Context, column string) (float64, error)
+    Paginate(ctx context.Context, page, perPage int) (*Pagination[T], error)
+
+    Relate(ctx context.Context, from models.RecordID, edge string, to models.RecordID, content map[string]any) (map[string]any, error)
 }
 ```
 
 ### Types
 
 ```go
-Model[T any]        // concrete implementation of QueryBuilder[T]
-Schema              // table definition builder (holds *surrealdb.DB)
-Table               // table definition (Name string, Columns []*Column)
-Column              // column definition (Name, Type, IsUnique, DefaultValue, Optional)
+Model[T any]         // concrete implementation of QueryBuilder[T]; hosts generic relationship methods
+Pagination[T any]    // page results (Data, Total, PerPage, CurrentPage, LastPage, From, To)
+Schema               // table definition builder (holds *surrealdb.DB)
+Table                // table definition (Name string, Columns []*Column)
+Column               // column definition (Name, Type, IsUnique, DefaultValue, Optional)
+Transaction          // interactive transaction (Begin/Commit/Cancel/IsClosed/Raw/Query)
+ErrNotFound          // returned by FindOrFail when no record matches
+ErrTransactionClosed // returned by Commit/Cancel on a closed transaction
 ```
 
-### Constructor
+### Constructors
 
 ```go
-func Query[T any](db *surrealdb.DB, table string) QueryBuilder[T]
+func Query[T any](db *surrealdb.DB, table string) *Model[T]
+func Begin(ctx context.Context, db *surrealdb.DB) (*Transaction, error)
+func (t *Transaction) Query[T any](table string) *Model[T]
+func QueryTx[T any](tx *Transaction, table string) *Model[T] // Deprecated: use tx.Query[T]
+```
+
+### Relationship methods (on `*Model[T]`)
+
+```go
+func (m *Model[T]) With[R any]() *Model[T]
+func (m *Model[T]) WithField[R any](name string) *Model[T]
+func (m Model[T]) WithNames(names ...string) *Model[T]
+func (m *Model[T]) HasMany[R any](ctx context.Context, relatedTable, foreignKey string) (*[]R, error)
+func (m *Model[T]) HasOne[R any](ctx context.Context, relatedTable, foreignKey string) (*R, error)
+func (m *Model[T]) BelongsTo[R any](ctx context.Context, parentTable, foreignKey string) (*R, error)
+func (m *Model[T]) Associate[R any](ctx context.Context, foreignKey string, parent *R) (*T, error)
+func (m *Model[T]) Dissociate(ctx context.Context, foreignKey string) (*T, error)
+```
+
+### Deprecated package-level relationship helpers
+
+```go
+func HasMany[T, R any](ctx context.Context, parent QueryBuilder[T], relatedTable, foreignKey string) (*[]R, error)
+func HasOne[T, R any](ctx context.Context, parent QueryBuilder[T], relatedTable, foreignKey string) (*R, error)
+func BelongsTo[T, R any](ctx context.Context, child QueryBuilder[T], parentTable, foreignKey string) (*R, error)
+func Associate[T, R any](ctx context.Context, child QueryBuilder[T], foreignKey string, parent *R) (*T, error)
+func Dissociate[T any](ctx context.Context, child QueryBuilder[T], foreignKey string) (*T, error)
+```
+
+## Integration Tests
+
+The package includes integration tests against a live SurrealDB. Set these environment variables and run with:
+
+```bash
+SURREALDB_INTEGRATION=1 \
+SURREALDB_URL=ws://localhost:8000/rpc \
+SURREALDB_USER=root \
+SURREALDB_PASS=root \
+SURREALDB_NS=test \
+SURREALDB_DB=test \
+go test -run Integration ./...
 ```

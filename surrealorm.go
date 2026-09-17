@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -19,7 +20,10 @@ type QueryBuilder[T any] interface {
 	WhereNotNull(column string) *Model[T]
 	WhereNull(column string) *Model[T]
 	WhereIn(column string, values []any) *Model[T]
-	OrderBy(column string) *Model[T]
+	WhereContains(column string, value any) *Model[T]
+	WhereContainsAny(column string, values ...any) *Model[T]
+	OrderBy(column string, direction ...string) *Model[T]
+	OrderByDesc(column string) *Model[T]
 	Limit(limit int) *Model[T]
 	WithNames(relations ...string) *Model[T]
 	WithTrashed() *Model[T]
@@ -41,6 +45,10 @@ type QueryBuilder[T any] interface {
 	Save(ctx context.Context, model *T) (*T, error)
 	Update(ctx context.Context, id any, data map[string]any) (*T, error)
 	UpdateWhere(ctx context.Context, data map[string]any) ([]T, error)
+	Increment(ctx context.Context, id any, column string, by int64) (*T, error)
+	Decrement(ctx context.Context, id any, column string, by int64) (*T, error)
+	WhereIncrement(ctx context.Context, column string, by int64) ([]T, error)
+	WhereDecrement(ctx context.Context, column string, by int64) ([]T, error)
 	Delete(ctx context.Context, id any) error
 	DeleteWhere(ctx context.Context) error
 	ForceDelete(ctx context.Context, id any) error
@@ -143,8 +151,21 @@ func (m Model[T]) WhereIn(column string, values []any) *Model[T] {
 	m.state.conds = append(m.state.conds, condition{sql: column + " IN ?", args: []any{values}})
 	return &m
 }
-func (m Model[T]) OrderBy(column string) *Model[T] {
+
+// OrderBy adds an ascending ORDER BY clause. Pass "DESC" as the optional
+// direction to order descending, e.g. OrderBy("created_at", "DESC").
+func (m Model[T]) OrderBy(column string, direction ...string) *Model[T] {
+	if len(direction) > 0 && strings.EqualFold(strings.TrimSpace(direction[0]), "DESC") {
+		m.sq.OrderByDesc(column)
+		return &m
+	}
 	m.sq.OrderBy(column)
+	return &m
+}
+
+// OrderByDesc adds an ORDER BY <column> DESC clause.
+func (m Model[T]) OrderByDesc(column string) *Model[T] {
+	m.sq.OrderByDesc(column)
 	return &m
 }
 func (m Model[T]) Limit(limit int) *Model[T] {
@@ -406,4 +427,13 @@ func (m Model[T]) whereMap(attrs map[string]any) *Model[T] {
 		q = q.WhereEq(k, v)
 	}
 	return q
+}
+
+var identifierRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// validIdentifier reports whether name is a safe SurrealDB field identifier.
+// Column names are interpolated into SQL (they cannot be bound parameters), so
+// the atomic counter helpers reject anything that is not a plain identifier.
+func validIdentifier(name string) bool {
+	return identifierRe.MatchString(name)
 }

@@ -130,6 +130,11 @@ user, err := q.Update(ctx, id, map[string]any{"name": "Dave"}) // SET-based upda
 // update matching records based on the current WHERE clauses
 updated, err := q.WhereEq("is_active", false).UpdateWhere(ctx, map[string]any{"is_active": true})
 
+// atomic counter updates (no read-modify-write race)
+user, err := q.Increment(ctx, id, "credits", 5)
+user, err = q.Decrement(ctx, id, "credits", 1)
+users, err := q.WhereEq("plan", "pro").WhereIncrement(ctx, "messages_used", 1)
+
 // insert-or-update a whole model (creates when it has no id, updates otherwise)
 user, err := q.Save(ctx, user)
 ```
@@ -410,6 +415,19 @@ outside it until `Commit` is called, and `Cancel` discards all changes.
 Calling `Commit` or `Cancel` after the transaction is already closed returns
 `ErrTransactionClosed`.
 
+## Raw Queries
+
+For DDL, aggregates or expressions the builder cannot express, use the
+package-level helpers. `Raw` checks every statement's error, not just the first,
+and returns the typed results.
+
+```go
+results, err := surrealgoorm.Raw[[]User](ctx, db,
+    "SELECT * FROM user WHERE age > $age", map[string]any{"age": 18})
+
+err = surrealgoorm.Exec(ctx, db, "DEFINE TABLE archived SCHEMAFULL;", nil)
+```
+
 ## Query Builder
 
 The core is a fluent, generic query builder. Chain methods return `*Model[T]`
@@ -432,7 +450,10 @@ surrealgoorm.Query[T](db, "table_name") // returns *Model[T]
 | `WhereNotNull(column string)` | WHERE field IS NOT NULL |
 | `WhereNull(column string)` | WHERE field IS NULL |
 | `WhereIn(column string, values []any)` | WHERE field IN (values) |
-| `OrderBy(column string)` | Add ORDER BY |
+| `WhereContains(column string, value any)` | WHERE array field CONTAINS value |
+| `WhereContainsAny(column string, values ...any)` | WHERE array field CONTAINSANY values |
+| `OrderBy(column string, direction ...string)` | Add ORDER BY (pass `"DESC"` for descending) |
+| `OrderByDesc(column string)` | Add ORDER BY field DESC |
 | `Limit(limit int)` | Add LIMIT |
 | `With[R]()` | Eager-load the unique relation field of type `R` (`*Model[T]` only) |
 | `WithField[R](name)` | Eager-load a named relation, checking type `R` (`*Model[T]` only) |
@@ -593,7 +614,10 @@ QueryBuilder[T any] interface {
     WhereNotNull(column string) *Model[T]
     WhereNull(column string) *Model[T]
     WhereIn(column string, values []any) *Model[T]
-    OrderBy(column string) *Model[T]
+    WhereContains(column string, value any) *Model[T]
+    WhereContainsAny(column string, values ...any) *Model[T]
+    OrderBy(column string, direction ...string) *Model[T]
+    OrderByDesc(column string) *Model[T]
     Limit(limit int) *Model[T]
     WithNames(relations ...string) *Model[T]
     WithTrashed() *Model[T]
@@ -615,6 +639,10 @@ QueryBuilder[T any] interface {
     Save(ctx context.Context, model *T) (*T, error)
     Update(ctx context.Context, id any, data map[string]any) (*T, error)
     UpdateWhere(ctx context.Context, data map[string]any) ([]T, error)
+    Increment(ctx context.Context, id any, column string, by int64) (*T, error)
+    Decrement(ctx context.Context, id any, column string, by int64) (*T, error)
+    WhereIncrement(ctx context.Context, column string, by int64) ([]T, error)
+    WhereDecrement(ctx context.Context, column string, by int64) ([]T, error)
     Delete(ctx context.Context, id any) error
     DeleteWhere(ctx context.Context) error
     ForceDelete(ctx context.Context, id any) error
@@ -650,6 +678,8 @@ ErrTransactionClosed // returned by Commit/Cancel on a closed transaction
 
 ```go
 func Query[T any](db *surrealdb.DB, table string) *Model[T]
+func Raw[T any](ctx context.Context, db *surrealdb.DB, sql string, vars map[string]any) (*[]surrealdb.QueryResult[T], error)
+func Exec(ctx context.Context, db *surrealdb.DB, sql string, vars map[string]any) error
 func Begin(ctx context.Context, db *surrealdb.DB) (*Transaction, error)
 func (t *Transaction) Query[T any](table string) *Model[T]
 func QueryTx[T any](tx *Transaction, table string) *Model[T] // Deprecated: use tx.Query[T]
